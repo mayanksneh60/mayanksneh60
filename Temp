@@ -1,1 +1,89 @@
-this file is temporary
+client side
+
+  dependencies {
+      implementation("io.modelcontextprotocol:kotlin-sdk:0.5.0")
+      implementation("io.ktor:ktor-client-okhttp:2.3.0")
+  }
+
+  <uses-permission android:name="android.permission.INTERNET" />
+
+class MainActivity : AppCompatActivity() {
+    private lateinit var mcpClient: Client
+    private lateinit var transport: WebSocketClientTransport
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        mcpClient = Client(
+            clientInfo = Implementation(name = "android-client", version = "1.0")
+        )
+
+        transport = WebSocketClientTransport(
+            url = "ws://10.0.2.2:8080/mcp", // Replace with your server's IP and port
+            client = OkHttpClient()
+        )
+
+        lifecycleScope.launch {
+            mcpClient.connect(transport)
+            val tools = mcpClient.listTools()
+            // Update UI with the list of tools
+        }
+    }
+}
+
+
+server side 
+
+  dependencies {
+      implementation("io.modelcontextprotocol:kotlin-sdk:0.5.0")
+      implementation("io.ktor:ktor-server-core:2.3.0")
+      implementation("io.ktor:ktor-server-netty:2.3.0")
+      implementation("io.ktor:ktor-server-websockets:2.3.0")
+  }
+
+  <uses-permission android:name="android.permission.INTERNET" />
+
+class MainActivity : AppCompatActivity() {
+    private lateinit var mcpServer: Server
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        mcpServer = Server(
+            serverInfo = Implementation(name = "android-server", version = "1.0"),
+            options = ServerOptions(
+                capabilities = ServerCapabilities(
+                    tools = ServerCapabilities.Tools(list = true, call = true)
+                )
+            )
+        )
+
+        mcpServer.onListTools {
+            listOf(
+                Tool(
+                    name = "echo",
+                    description = "Echoes the input message",
+                    inputSchema = """{"type":"object","properties":{"message":{"type":"string"}}}"""
+                )
+            )
+        }
+
+        mcpServer.onCallTool("echo") { params ->
+            val message = params["message"] as? String ?: ""
+            "Echo: $message"
+        }
+
+        embeddedServer(Netty, port = 8080) {
+            install(WebSockets)
+            routing {
+                webSocket("/mcp") {
+                    val transport = WebSocketServerTransport(this)
+                    mcpServer.connect(transport)
+                }
+            }
+        }.start(wait = false)
+    }
+}
+
