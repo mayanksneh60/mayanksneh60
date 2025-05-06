@@ -60,21 +60,25 @@ class MainActivity : AppCompatActivity() {
             )
         )
 
-        mcpServer.onListTools {
-            listOf(
-                Tool(
-                    name = "echo",
-                    description = "Echoes the input message",
-                    inputSchema = """{"type":"object","properties":{"message":{"type":"string"}}}"""
-                )
+        // Register the "echo" tool
+        mcpServer.registerTool(
+            Tool(
+                name = "echo",
+                description = "Echoes the input message",
+                inputSchema = """{
+                    "type": "object",
+                    "properties": {
+                        "message": { "type": "string" }
+                    },
+                    "required": ["message"]
+                }"""
             )
-        }
-
-        mcpServer.onCallTool("echo") { params ->
+        ) { params ->
             val message = params["message"] as? String ?: ""
             "Echo: $message"
         }
 
+        // Start the server
         embeddedServer(Netty, port = 8080) {
             install(WebSockets)
             routing {
