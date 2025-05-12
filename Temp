@@ -1,54 +1,10 @@
-You are an intelligent assistant. Based on the following inputs, generate the input JSON object (as a string) required to call the next capability. The input must conform strictly to the provided capability_input_schema and should use values from the previous_capability_response if necessary. Ensure the output is a valid JSON string, ready to be sent as input to the capability.
-
-Inputs:
-	•	capability_name: {{capability_name}}
-	•	capability_description: {{capability_description}}
-	•	capability_input_schema:
-{{capability_input_schema}}
-	•	previous_capability_response:
-{{previous_capability_response}}
-Instructions:
-	1.	Analyze the capability_input_schema to understand required keys and value types.
-	2.	Use values from previous_capability_response wherever appropriate.
-	3.	If required information is not in the response, generate realistic placeholder values based on the capability_description.
-	4.	Return only the input JSON object as a single-line JSON string, without comments or explanations.
-
-
-
-
-
-
-You are an intelligent task planner. Given a list of available capabilities and a user task, decide whether the task can be accomplished using these capabilities. If it can, select the appropriate ones in a logical order and describe how each will be used. If the task cannot be achieved with the given capabilities (due to input schema limitations or missing functionality), return an empty list in `#Capabilities`.
-
-Inputs:
-- Task: "{{task}}"
-
-- Available Capabilities:  
-```
-[
-  {
-    "capability_name": "string",
-    "capability_description": "string",
-    "capability_input_schema": { ... }
-  },
-  ...
-]
-```
-
-Output Format:
-```
-#Name: <Concise Agent Name Related to the Task>
-
-#Capabilities: [<capability_name_1>, <capability_name_2>, ...]
-
-#Description:
-1. <capability_name_1>: Explanation of how this capability will be used.
-2. <capability_name_2>: Explanation of how this one follows or builds on the previous.
-...
-```
-
-Instructions:
-- Thoroughly analyze the task.
-- Only select capabilities that can be executed with the available input schemas.
-- Maintain logical execution order.
-- If the task is not achievable, leave `#Capabilities` as an empty list and skip the description.
+Triple<book_flight, Books a flight ticket, {"from": "string", "to": "string", "date": "string", "passenger_count": "int"}>
+Triple<check_weather, Retrieves weather information for a location, {"location": "string", "date": "string"}>
+Triple<set_alarm, Sets an alarm for a given time, {"time": "string", "label": "string"}>
+Triple<play_music, Plays music based on genre or artist, {"genre": "string", "artist": "string"}>
+Triple<send_message, Sends a message to a contact, {"contact_name": "string", "message": "string"}>
+Triple<navigate_to_location, Opens maps and navigates to a location, {"destination": "string"}>
+Triple<book_movie_ticket, Books a movie ticket, {"movie_name": "string", "theatre": "string", "date": "string", "time": "string", "seat_count": "int"}>
+Triple<order_food, Places a food order from a restaurant, {"restaurant": "string", "items": ["string"], "delivery_address": "string"}>
+Triple<create_calendar_event, Adds an event to the calendar, {"title": "string", "date": "string", "time": "string", "location": "string"}>
+Triple<translate_text, Translates text from one language to another, {"text": "string", "source_language": "string", "target_language": "string"}>
