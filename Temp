@@ -1,10 +1,132 @@
-Triple<book_flight, Books a flight ticket, {"from": "string", "to": "string", "date": "string", "passenger_count": "int"}>
-Triple<check_weather, Retrieves weather information for a location, {"location": "string", "date": "string"}>
-Triple<set_alarm, Sets an alarm for a given time, {"time": "string", "label": "string"}>
-Triple<play_music, Plays music based on genre or artist, {"genre": "string", "artist": "string"}>
-Triple<send_message, Sends a message to a contact, {"contact_name": "string", "message": "string"}>
-Triple<navigate_to_location, Opens maps and navigates to a location, {"destination": "string"}>
-Triple<book_movie_ticket, Books a movie ticket, {"movie_name": "string", "theatre": "string", "date": "string", "time": "string", "seat_count": "int"}>
-Triple<order_food, Places a food order from a restaurant, {"restaurant": "string", "items": ["string"], "delivery_address": "string"}>
-Triple<create_calendar_event, Adds an event to the calendar, {"title": "string", "date": "string", "time": "string", "location": "string"}>
-Triple<translate_text, Translates text from one language to another, {"text": "string", "source_language": "string", "target_language": "string"}>
+package com.example.globaltouchmonitor
+
+import android.os.Bundle
+import androidx.appcompat.app.AppCompatActivity
+
+class MainActivity : AppCompatActivity() {
+
+    companion object {
+        init {
+            System.loadLibrary("inputreader")
+        }
+    }
+
+    external fun startInputListener()
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+        Thread { startInputListener() }.start()
+    }
+}
+
+
+
+#include <jni.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <linux/input.h>
+#include <android/log.h>
+#include <dirent.h>
+#include <vector>
+#include <string>
+
+#define TAG "InputMonitor"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_example_globaltouchmonitor_MainActivity_startInputListener(JNIEnv *, jobject) {
+    const char* input_dir = "/dev/input";
+    DIR* dir = opendir(input_dir);
+    if (!dir) {
+        LOGI("Failed to open /dev/input");
+        return;
+    }
+
+    std::vector<int> fds;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        if (strncmp(entry->d_name, "event", 5) == 0) {
+            std::string path = std::string(input_dir) + "/" + entry->d_name;
+            int fd = open(path.c_str(), O_RDONLY);
+            if (fd >= 0) {
+                fds.push_back(fd);
+                LOGI("Opened input device: %s", path.c_str());
+            }
+        }
+    }
+    closedir(dir);
+
+    struct input_event ev;
+    int x = -1, y = -1;
+
+    while (true) {
+        for (int fd : fds) {
+            ssize_t n = read(fd, &ev, sizeof(ev));
+            if (n == sizeof(ev)) {
+                if (ev.type == EV_ABS) {
+                    if (ev.code == ABS_MT_POSITION_X || ev.code == ABS_X) {
+                        x = ev.value;
+                    } else if (ev.code == ABS_MT_POSITION_Y || ev.code == ABS_Y) {
+                        y = ev.value;
+                    }
+                }
+
+                if (ev.type == EV_SYN && x != -1 && y != -1) {
+                    LOGI("Touch at x=%d, y=%d", x, y);
+                    x = y = -1;
+                }
+            }
+        }
+        usleep(5000);
+    }
+
+    for (int fd : fds) {
+        close(fd);
+    }
+}
+
+
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/touch_area"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:padding="24dp">
+    <!-- UI elements can be added here -->
+</LinearLayout>
+
+
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.globaltouchmonitor">
+    <uses-permission android:name="android.permission.READ_INPUT_STATE"/>
+    <uses-permission android:name="android.permission.INJECT_EVENTS"/>
+    <uses-permission android:name="android.permission.MONITOR_INPUT"/>
+    <uses-permission android:name="android.permission.INTERACT_ACROSS_USERS_FULL"/>
+
+    <application
+        android:sharedUserId="android.uid.system"
+        android:allowClearUserData="false"
+        android:hasCode="true"
+        android:label="@string/app_name">
+        <activity android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+
+
+cmake_minimum_required(VERSION 3.4.1)
+add_library(inputreader SHARED inputreader.cpp)
+find_library(log-lib log)
+target_link_libraries(inputreader ${log-lib})
+
+
+
