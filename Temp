@@ -207,3 +207,12 @@ android {
 dependencies {
     implementation("org.jetbrains.kotlin:kotlin-stdlib:1.9.0")
 }
+
+
+
+int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
+if (fd < 0) {
+    LOGI("open failed, trying with su");
+    system(("su -c 'chmod 666 " + path + "'").c_str());
+    fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
+}
