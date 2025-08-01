@@ -216,3 +216,102 @@ if (fd < 0) {
     system(("su -c 'chmod 666 " + path + "'").c_str());
     fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
 }
+
+
+
+
+
+
+✅ 1. UIED (UI Element Detector) Based Approach
+	•	UIED is a hybrid deep learning + heuristic tool that detects UI elements (buttons, icons, texts) from screenshots.
+	•	It gives you bounding boxes and clickability heuristics using layout and design clues.
+
+Pros:
+	•	Designed specifically for mobile UI.
+	•	Can detect UI types (buttons, icons, text).
+
+Cons:
+	•	Doesn’t work well on custom UI themes or complex backgrounds.
+	•	Requires setup with PyTorch/Mask-RCNN.
+
+You can use:
+	•	UIED GitHub
+
+⸻
+
+✅ 2. OmniParser (for clickability via ML)
+	•	OmniParser uses a combination of:
+	•	CNN + Graph Neural Networks
+	•	Extracts semantic + spatial features of elements.
+	•	Trained to predict element type, including clickable vs non-clickable.
+
+Pros:
+	•	More accurate than heuristic methods.
+	•	Can handle complex layouts.
+
+Cons:
+	•	Requires GPU + model training/inference setup.
+	•	Needs annotated data to fine-tune.
+
+You can use:
+	•	OmniParser GitHub
+
+⸻
+
+✅ 3. Computer Vision + Heuristics (Your Custom OpenCV Pipeline)
+	•	Use OpenCV to detect shapes, colors, and text.
+	•	Create heuristic rules:
+	•	Rectangular shapes with centered text/icons ⇒ likely a button
+	•	Buttons have padding, border, or raised/elevated look
+	•	Use grayscale pixel differences for enabled/disabled state
+
+Steps:
+	•	Convert image to grayscale or HSV
+	•	Use contour detection
+	•	Apply heuristics like:
+if aspect_ratio ~2:1 and has_border and contains_text:
+    mark as clickable
+
+Pros:
+	•	Lightweight
+	•	No model training needed
+
+Cons:
+	•	Prone to errors in custom or minimal UI designs
+
+⸻
+
+✅ 4. Use OCR (e.g., Tesseract) + Rule-Based Clickability
+	•	Use OCR to detect labels like “Submit”, “OK”, etc.
+	•	Combine with bounding box + color info to guess button state.
+
+Clickability Indicators:
+	•	Words like “OK”, “Next”, “Login”
+	•	If it’s grayed out → non-clickable
+	•	If bright, highlighted → clickable
+
+⸻
+
+✅ 5. Deep Learning Approach (Train Custom Model)
+	•	Annotate UI screenshots with labels: “clickable”, “non-clickable”.
+	•	Train a model using:
+	•	CNN or Transformer + classification head
+	•	Or object detection like YOLO to also get bounding boxes
+
+Pros:
+	•	Most flexible and scalable.
+	•	Can learn from real-world data.
+
+Cons:
+	•	Need a lot of labeled data
+	•	Model size and speed tradeoffs
+
+⸻
+
+✅ 6. UI Automator XML and Screenshot Together (Ground Truth + Vision)
+
+If you want high accuracy and are just testing:
+	•	Use Android’s UI Automator dump to extract XML + screenshot.
+	•	Match UI element bounds in XML with image and annotate clickability.
+	•	Use it to train your CV model.
+
