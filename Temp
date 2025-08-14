@@ -163,3 +163,51 @@ If you want, I’ll now generate a runnable starter repo (Python) that wires:
 	•	dataset loader that consumes your adb dumps (screenshots + uiautomator XML → JSON serializer).
 
 Tell me which LLM you want me to wire in the starter code (T5‑XXL, Llama‑2‑13B, or Llama‑2‑70B) and whether you have a multi‑GPU cluster (8×A100 / 4×A100 / single‑48GB). I’ll tailor the repo for that infra.
+
+
+
+
+
+
+Here’s a well-structured prompt you can use for an LLM or vision model to detect the On/Off states of quick setting toggles from a Samsung smartphone screenshot:
+
+⸻
+
+Prompt:
+
+You are given a screenshot of the dropdown Quick Settings panel from a Samsung smartphone.
+Identify all visible toggle elements such as:
+	•	Airplane Mode
+	•	Bluetooth
+	•	Wi-Fi
+	•	Mobile Data
+	•	Location
+	•	Do Not Disturb
+	•	Hotspot
+	•	Torch/Flashlight
+	•	Power Saving Mode
+	•	Any other visible quick setting icons
+
+For each detected element, return its name and current state (On or Off).
+
+Rules:
+	•	The name must exactly match the icon’s function (e.g., “Bluetooth” instead of “BT”).
+	•	The state should be On if the icon appears active (highlighted or colored) and Off if inactive (greyed out).
+	•	If an element is partially visible but recognizable, still include it.
+	•	Do not include elements that are not part of the quick settings panel.
+
+Output format (JSON):
+
+[
+  {"name": "Wi-Fi", "state": "On"},
+  {"name": "Bluetooth", "state": "Off"},
+  {"name": "Airplane Mode", "state": "Off"}
+]
+
+
+
+⸻
+
+If you want, I can also extend this prompt so that it works optimally with vision-language models like GPT-4o or Gemini, where the screenshot is passed as an image input. This way it will handle Samsung UI’s specific icon coloring and arrangement.
+
+Do you want me to make that extended version for Samsung’s One UI style?
