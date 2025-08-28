@@ -211,3 +211,32 @@ Output format (JSON):
 If you want, I can also extend this prompt so that it works optimally with vision-language models like GPT-4o or Gemini, where the screenshot is passed as an image input. This way it will handle Samsung UI’s specific icon coloring and arrangement.
 
 Do you want me to make that extended version for Samsung’s One UI style?
+
+
+
+
+
+from transformers import AutoProcessor, AutoModelForVision2Seq
+from PIL import Image
+
+# Load processor and model
+model_id = "liuhaotian/llava-v1.5-13b"
+processor = AutoProcessor.from_pretrained(model_id)
+model = AutoModelForVision2Seq.from_pretrained(
+    model_id, 
+    torch_dtype="auto", 
+    device_map="auto"
+)
+
+# Load image
+image = Image.open("example.jpg")
+
+# Prompt
+prompt = "USER: Describe this image in detail. ASSISTANT:"
+
+# Preprocess
+inputs = processor(prompt, image, return_tensors="pt").to(model.device)
+
+# Generate
+output = model.generate(**inputs, max_new_tokens=200)
+print(processor.decode(output[0], skip_special_tokens=True))
