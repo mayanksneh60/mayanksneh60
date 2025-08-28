@@ -240,3 +240,32 @@ inputs = processor(prompt, image, return_tensors="pt").to(model.device)
 # Generate
 output = model.generate(**inputs, max_new_tokens=200)
 print(processor.decode(output[0], skip_special_tokens=True))
+
+
+import torch
+from transformers import AutoProcessor, LlavaForConditionalGeneration
+from PIL import Image
+
+# Use the HF-compatible version
+model_id = "llava-hf/llava-1.5-13b-hf"
+
+# Load processor + model
+processor = AutoProcessor.from_pretrained(model_id)
+model = LlavaForConditionalGeneration.from_pretrained(
+    model_id,
+    torch_dtype=torch.float16,
+    device_map="auto"
+)
+
+# Load an image
+image = Image.open("example.jpg")
+
+# Prompt
+prompt = "USER: What’s in this image? ASSISTANT:"
+
+# Preprocess
+inputs = processor(prompt, image, return_tensors="pt").to(model.device)
+
+# Generate
+output = model.generate(**inputs, max_new_tokens=200)
+print(processor.decode(output[0], skip_special_tokens=True))
