@@ -269,3 +269,47 @@ inputs = processor(prompt, image, return_tensors="pt").to(model.device)
 # Generate
 output = model.generate(**inputs, max_new_tokens=200)
 print(processor.decode(output[0], skip_special_tokens=True))
+
+
+
+
+
+1. Collaboration
+
+I actively collaborate across teams and functions, sharing insights and resources to achieve collective goals. I proactively support colleagues beyond my direct responsibilities, which helps drive smoother project execution and stronger team alignment.
+
+2. Communication
+
+I clearly communicate ideas, project updates, and outcomes to a variety of stakeholders. I adjust my approach based on the audience to ensure understanding, alignment, and faster decision-making.
+
+3. Continuous Learning
+
+I continuously develop my skills and stay updated with new tools, methods, and technologies relevant to our work. I bring fresh perspectives back to the team and apply them to improve processes and results.
+
+4. Decision-Making
+
+I make informed decisions using data and thorough analysis, weighing short- and long-term impacts. I involve the right stakeholders to ensure decisions align with organizational objectives.
+
+5. Driving Force
+
+I take full ownership of my tasks and follow through on deliverables. I anticipate challenges, manage dependencies proactively, and keep initiatives moving toward successful completion.
+
+6. Global Perspective
+
+I consider diverse viewpoints and adapt solutions for different markets and user needs. I value cultural differences and integrate global learnings into our projects to enhance results.
+
+7. Innovation
+
+I actively identify areas for improvement and bring forward creative, practical solutions. I embrace change and encourage innovative thinking within the team to unlock new opportunities.
+
+8. Problem-Solving
+
+I approach problems systematically, identifying root causes and exploring multiple solutions. I engage stakeholders early to ensure alignment and effective implementation.
+
+9. Quality Focus
+
+I consistently seek feedback to improve work quality. I apply lessons learned to deliver more reliable, efficient, and user-focused outcomes aligned with Samsung’s commitment to excellence.
+
+10. Risk Management
+
+I proactively identify and communicate risks early, balancing opportunities and potential impacts. I recommend mitigation strategies to ensure smooth project execution and stable outcomes.
