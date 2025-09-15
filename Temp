@@ -317,3 +317,37 @@ I proactively identify and communicate risks early, balancing opportunities and 
 
 
 I consistently contribute to achieving Samsung’s goals by collaborating across teams, communicating clearly, and driving innovation with a global outlook. I take ownership of deliverables, apply continuous learning, and ensure quality outcomes while proactively managing risks. My approach supports Samsung’s commitment to excellence and customer-focused innovation
+
+
+
+@echo off
+echo ================================================
+echo   Wiping Android Studio, SDK, Gradle caches…
+echo ================================================
+
+REM Hard-coded for user m.sneh
+SET USERDIR=C:\Users\m.sneh
+
+echo.
+echo Deleting Android Studio config folders…
+rmdir /S /Q "%USERDIR%\.AndroidStudio*"
+rmdir /S /Q "%USERDIR%\AppData\Roaming\Google\AndroidStudio*"
+rmdir /S /Q "%USERDIR%\AppData\Local\Google\AndroidStudio*"
+
+echo.
+echo Deleting Android SDK folder…
+rmdir /S /Q "%USERDIR%\AppData\Local\Android"
+
+echo.
+echo Deleting .android folder (AVDs, settings)…
+rmdir /S /Q "%USERDIR%\.android"
+
+echo.
+echo Deleting Gradle cache…
+rmdir /S /Q "%USERDIR%\.gradle"
+
+echo.
+echo ================================================
+echo   Done. All specified folders removed.
+echo ================================================
+pause
