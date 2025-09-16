@@ -1,16 +1,19 @@
 import layoutparser as lp
 import cv2
 
-# Load image
 image = cv2.imread("screenshot.png")
 image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
 ocr_agent = lp.TesseractAgent(languages='eng')
 
-# ✅ Use detect() to get LayoutElements
+# Must use detect() not recognize()
 layout = ocr_agent.detect(image)
 
-# Each element in layout is a TextBlock with .text and .coordinates
+fields = {}
 for block in layout:
-    print("Text:", block.text)
-    print("Coordinates:", block.coordinates)
+    # block is a TextBlock
+    text = block.text       # in newer versions text lives directly here
+    x1, y1, x2, y2 = block.coordinates  # top-left & bottom-right
+    fields[text] = (x1, y1, x2, y2)
+
+print(fields)
