@@ -1,20 +1,13 @@
-import pytesseract
-from PIL import Image
+import layoutparser as lp
 
-image = Image.open("screenshot.png")
+image = lp.io.load_image("screenshot.png")
 
-# Get OCR data as a dictionary
-data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+# Pretrained model for layout detection
+model = lp.Detectron2LayoutModel(
+    config_path='lp://PubLayNet/faster_rcnn_R_50_FPN_3x/config',
+    label_map={0: "Text", 1: "Title", 2: "List", 3: "Table", 4: "Figure"}
+)
 
-fields = {}
-for i, text in enumerate(data['text']):
-    if text.strip() != "" and int(data['conf'][i]) > 60:  # confidence threshold
-        x1 = data['left'][i]                    # top-left X
-        y1 = data['top'][i]                     # top-left Y
-        x2 = x1 + data['width'][i]              # bottom-right X
-        y2 = y1 + data['height'][i]             # bottom-right Y
-
-        # Store as ((x1, y1), (x2, y2))
-        fields[text] = ((x1, y1), (x2, y2))
-
-print(fields)
+layout = model.detect(image)
+for block in layout:
+    print(block.type, block.block, block.score)
