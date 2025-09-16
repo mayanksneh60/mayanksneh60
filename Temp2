@@ -1,22 +1,9 @@
-import layoutparser as lp
-from PIL import Image
-
-# Load image directly as PIL
-image = Image.open("screenshot.png")
-
-ocr_agent = lp.TesseractAgent(languages='eng')
-
-# MUST use detect() here
-layout = ocr_agent.detect(image)
-
-print("layout type:", type(layout))
-print("layout length:", len(layout))
-print("first element type:", type(layout[0]))
+import easyocr
+reader = easyocr.Reader(['en'])
+results = reader.readtext("screenshot.png")
 
 fields = {}
-for block in layout:
-    text = block.text
-    x1, y1, x2, y2 = block.coordinates
-    fields[text] = (x1, y1, x2, y2)
-
+for (bbox, text, conf) in results:
+    (x1, y1), (x2, y2), (x3, y3), (x4, y4) = bbox
+    fields[text] = (int(x1), int(y1), int(x3), int(y3))  # top-left & bottom-right
 print(fields)
