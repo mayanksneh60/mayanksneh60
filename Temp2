@@ -1,19 +1,26 @@
 import layoutparser as lp
 import cv2
+from PIL import Image
+import numpy as np
 
-image = cv2.imread("screenshot.png")
-image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+# Read image with cv2
+image_cv = cv2.imread("screenshot.png")
+image_cv = cv2.cvtColor(image_cv, cv2.COLOR_BGR2RGB)
+
+# Convert to PIL for LayoutParser
+image = Image.fromarray(image_cv)
 
 ocr_agent = lp.TesseractAgent(languages='eng')
 
-# Must use detect() not recognize()
 layout = ocr_agent.detect(image)
+
+print("layout type:", type(layout))
+print("layout length:", len(layout))
 
 fields = {}
 for block in layout:
-    # block is a TextBlock
-    text = block.text       # in newer versions text lives directly here
-    x1, y1, x2, y2 = block.coordinates  # top-left & bottom-right
+    text = block.text                       # in v0.3.4 this works
+    x1, y1, x2, y2 = block.coordinates
     fields[text] = (x1, y1, x2, y2)
 
 print(fields)
