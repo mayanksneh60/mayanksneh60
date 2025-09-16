@@ -1,0 +1,15 @@
+import pytesseract
+from PIL import Image
+
+image = Image.open("screenshot.png")
+
+# Get OCR data as a dictionary
+data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+
+fields = {}
+for i, text in enumerate(data['text']):
+    if text.strip() != "" and int(data['conf'][i]) > 60:  # confidence threshold
+        x, y, w, h = data['left'][i], data['top'][i], data['width'][i], data['height'][i]
+        fields[text] = (x, y, w, h)
+
+print(fields)
