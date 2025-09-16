@@ -1,15 +1,16 @@
-import cv2
 import layoutparser as lp
+import cv2
 
-# Load image with OpenCV
+# Load image
 image = cv2.imread("screenshot.png")
-
-# Convert BGR to RGB (important for layoutparser)
 image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-# Now you can pass 'image' to Layout Parser models:
 ocr_agent = lp.TesseractAgent(languages='eng')
+
+# ✅ Use detect() to get LayoutElements
 layout = ocr_agent.detect(image)
 
+# Each element in layout is a TextBlock with .text and .coordinates
 for block in layout:
-    print(block.text, block.coordinates)
+    print("Text:", block.text)
+    print("Coordinates:", block.coordinates)
