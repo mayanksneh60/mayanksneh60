@@ -9,15 +9,12 @@ data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
 fields = {}
 for i, text in enumerate(data['text']):
     if text.strip() != "" and int(data['conf'][i]) > 60:  # confidence threshold
-        left = data['left'][i]
-        top = data['top'][i]
-        width = data['width'][i]
-        height = data['height'][i]
+        x1 = data['left'][i]                    # top-left X
+        y1 = data['top'][i]                     # top-left Y
+        x2 = x1 + data['width'][i]              # bottom-right X
+        y2 = y1 + data['height'][i]             # bottom-right Y
 
-        right = left + width
-        bottom = top + height
-
-        # Store as (left, top, right, bottom)
-        fields[text] = (left, top, right, bottom)
+        # Store as ((x1, y1), (x2, y2))
+        fields[text] = ((x1, y1), (x2, y2))
 
 print(fields)
