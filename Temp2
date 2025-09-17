@@ -1,9 +1,48 @@
-import easyocr
-reader = easyocr.Reader(['en'])
-results = reader.readtext("screenshot.png")
+from paddleocr import PaddleOCR
+
+ocr = PaddleOCR(use_angle_cls=True, lang='en')
+result = ocr.ocr('screenshot.png', cls=True)
 
 fields = {}
-for (bbox, text, conf) in results:
-    (x1, y1), (x2, y2), (x3, y3), (x4, y4) = bbox
-    fields[text] = (int(x1), int(y1), int(x3), int(y3))  # top-left & bottom-right
-print(fields)
+for i, line in enumerate(result[0]):
+    box = line[0]  # bounding box
+    text = line[1][0]
+    fields[f"text_field_{i}"] = {
+        "text": text,
+        "bounds": box
+    }
+
+
+
+
+
+import layoutparser as lp
+import cv2
+import pytesseract
+
+# Load the image
+image = cv2.imread("screenshot.png")
+
+# 1. Detect text boxes
+model = lp.Detectron2LayoutModel(
+    config_path='lp://PubLayNet/faster_rcnn_R_50_FPN_3x/config',  # Layout model
+    label_map={0:"Text"}, 
+    extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", 0.5]
+)
+
+layout = model.detect(image)
+
+results = {}
+
+# 2. OCR each detected text box
+for i, block in enumerate(layout):
+    x1, y1, x2, y2 = map(int, block.block.coordinates)  # bounding box
+    cropped = image[y1:y2, x1:x2]
+    text = pytesseract.image_to_string(cropped).strip()
+    if text:
+        results[f"text_field_{i}"] = {
+            "text": text,
+            "bounds": (x1, y1, x2, y2)
+        }
+
+print(results)
