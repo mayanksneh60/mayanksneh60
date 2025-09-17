@@ -1,40 +1,28 @@
-from doctr.io import DocumentFile
-from doctr.models import ocr_predictor
+from ultralytics import YOLO
 
-# Load image
-doc = DocumentFile.from_images("screenshot.png")
+# Load your trained model
+model = YOLO("best.pt")  # path to your trained YOLO weights
 
-# Load the model (detector + recognizer)
-# pre-trained on natural text (DBResNet50 + CRNN_VGG16_BN)
-model = ocr_predictor(pretrained=True)
-
-# Perform OCR
-result = model(doc)
+# Run inference on an image
+results = model("screenshot.png")
 
 fields = {}
 counter = 0
 
-# iterate over all pages and blocks
-for page in result.pages:
-    for block in page.blocks:
-        for line in block.lines:
-            for word in line.words:
-                # word.value = text
-                # word.geometry = [[x_min, y_min], [x_max, y_max]] normalized (0–1)
-                text = word.value
-                ((x_min, y_min), (x_max, y_max)) = word.geometry
+# Iterate over detections
+for r in results:
+    boxes = r.boxes  # bounding boxes
+    for box in boxes:
+        # box.xyxy = [x1,y1,x2,y2]
+        x1, y1, x2, y2 = box.xyxy[0].tolist()
+        cls = int(box.cls[0])
+        conf = float(box.conf[0])
 
-                # convert normalized coords to pixel coords
-                img_w, img_h = doc[0].shape[1], doc[0].shape[0]
-                x1, y1 = int(x_min * img_w), int(y_min * img_h)
-                x2, y2 = int(x_max * img_w), int(y_max * img_h)
+        fields[f"text_field_{counter}"] = {
+            "class": model.names[cls],  # 'TextField' or your class name
+            "confidence": conf,
+            "bounds": {"top_left": (x1, y1), "bottom_right": (x2, y2)}
+        }
+        counter += 1
 
-                fields[f"text_field_{counter}"] = {
-                    "text": text,
-                    "bounds": {"top_left": (x1, y1), "bottom_right": (x2, y2)}
-                }
-                counter += 1
-
-# Print extracted text + bounds
-for key, val in fields.items():
-    print(key, val)
+print(fields)
