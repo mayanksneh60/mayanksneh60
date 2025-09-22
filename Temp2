@@ -1,109 +1,35 @@
-<service
-    android:name=".MyAutofillService"
-    android:permission="android.permission.BIND_AUTOFILL_SERVICE"
-    android:exported="true">
-    <intent-filter>
-        <action android:name="android.service.autofill.AutofillService" />
-    </intent-filter>
+private fun traverseAndLogViewNode(node: AssistStructure.ViewNode, depth: Int = 0) {
+    val indent = " ".repeat(depth * 2)
 
-    <meta-data
-        android:name="android.autofill"
-        android:resource="@xml/autofill_service_config" />
-</service>
+    Log.d("AutofillDump", "${indent}ViewNode:")
+    Log.d("AutofillDump", "${indent}  idEntry: ${node.idEntry}")
+    Log.d("AutofillDump", "${indent}  idPackage: ${node.idPackage}")
+    Log.d("AutofillDump", "${indent}  idType: ${node.idType}")
+    Log.d("AutofillDump", "${indent}  className: ${node.className}")
+    Log.d("AutofillDump", "${indent}  hint: ${node.hint}")
+    Log.d("AutofillDump", "${indent}  text: ${node.text}")
+    Log.d("AutofillDump", "${indent}  autofillHints: ${node.autofillHints?.joinToString()}")
+    Log.d("AutofillDump", "${indent}  autofillType: ${node.autofillType}")
+    Log.d("AutofillDump", "${indent}  autofillValue: ${node.autofillValue}")
+    Log.d("AutofillDump", "${indent}  contentDescription: ${node.contentDescription}")
+    Log.d("AutofillDump", "${indent}  htmlInfo: ${node.htmlInfo}")
+    Log.d("AutofillDump", "${indent}  importantForAutofill: ${node.importantForAutofill}")
+    Log.d("AutofillDump", "${indent}  inputType: ${node.inputType}")
+    Log.d("AutofillDump", "${indent}  isEnabled: ${node.isEnabled}")
+    Log.d("AutofillDump", "${indent}  isFocused: ${node.isFocused}")
+    Log.d("AutofillDump", "${indent}  webDomain: ${node.webDomain}")
+    Log.d("AutofillDump", "${indent}  webScheme: ${node.webScheme}")
+    Log.d("AutofillDump", "${indent}  webDomain: ${node.webDomain}")
+    Log.d("AutofillDump", "${indent}  url: ${node.webDomain}")
 
-
-<?xml version="1.0" encoding="utf-8"?>
-<autofill-service
-    xmlns:android="http://schemas.android.com/apk/res/android"
-    android:settingsActivity=".AutofillSettingsActivity"
-    android:supportsInlineSuggestions="true" />
-
-
-import android.app.assist.AssistStructure
-import android.service.autofill.*
-import android.view.autofill.AutofillId
-import android.widget.RemoteViews
-
-class MyAutofillService : AutofillService() {
-
-    override fun onFillRequest(
-        request: FillRequest,
-        cancellationSignal: android.os.CancellationSignal,
-        callback: FillCallback
-    ) {
-        val structure = request.fillContexts.last().structure
-        val nodes = parseStructure(structure)
-
-        if (nodes.isEmpty()) {
-            callback.onSuccess(null)
-            return
-        }
-
-        // Example dataset: username + password
-        val datasetBuilder = Dataset.Builder()
-
-        nodes["username"]?.let { id ->
-            val presentation = RemoteViews(packageName, android.R.layout.simple_list_item_1)
-            presentation.setTextViewText(android.R.id.text1, "user@example.com")
-            datasetBuilder.setValue(id, AutofillValue.forText("user@example.com"), presentation)
-        }
-
-        nodes["password"]?.let { id ->
-            val presentation = RemoteViews(packageName, android.R.layout.simple_list_item_1)
-            presentation.setTextViewText(android.R.id.text1, "********")
-            datasetBuilder.setValue(id, AutofillValue.forText("mypassword"), presentation)
-        }
-
-        val response = FillResponse.Builder()
-            .addDataset(datasetBuilder.build())
-            .build()
-
-        callback.onSuccess(response)
+    // Dump extras if available
+    node.extras?.let {
+        Log.d("AutofillDump", "${indent}  extras: $it")
     }
 
-    override fun onSaveRequest(
-        request: SaveRequest,
-        callback: SaveCallback
-    ) {
-        // Handle save request (optional: store credentials)
-        callback.onSuccess()
+    // Traverse children
+    val childrenSize = node.childCount
+    for (i in 0 until childrenSize) {
+        traverseAndLogViewNode(node.getChildAt(i), depth + 1)
     }
-
-    private fun parseStructure(structure: AssistStructure): Map<String, AutofillId> {
-        val nodes = mutableMapOf<String, AutofillId>()
-
-        for (i in 0 until structure.windowNodeCount) {
-            val windowNode = structure.getWindowNodeAt(i)
-            traverseNode(windowNode.rootViewNode, nodes)
-        }
-        return nodes
-    }
-
-    private fun traverseNode(node: AssistStructure.ViewNode, nodes: MutableMap<String, AutofillId>) {
-        val hint = node.autofillHints?.firstOrNull()
-        if (hint != null) {
-            when (hint.lowercase()) {
-                "username", "email" -> nodes["username"] = node.autofillId
-                "password" -> nodes["password"] = node.autofillId
-            }
-        }
-
-        for (i in 0 until node.childCount) {
-            traverseNode(node.getChildAt(i), nodes)
-        }
-    }
-}
-
-
-
-import android.provider.Settings
-import android.content.ComponentName
-
-fun setAsDefaultAutofill(context: android.content.Context) {
-    val component = ComponentName(context, MyAutofillService::class.java)
-    Settings.Secure.putString(
-        context.contentResolver,
-        Settings.Secure.AUTOFILL_SERVICE,
-        component.flattenToShortString()
-    )
 }
