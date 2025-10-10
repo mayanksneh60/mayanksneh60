@@ -1,353 +1,148 @@
-Nice — below is a complete, concrete architecture (no hand‑waving) that you can implement to get the best accuracy mapping Android screenshots → UiAutomator XML. I’ll state exact components, what each part does, the shapes/dims you should use, training tips, and where to get reference code / model weights. I’ll also show how the projection is implemented — it’s the Q‑Former + linear projection stage in BLIP‑2 style.
-
-I’ll call out references where it helps you implement the pieces.  ￼ ￼ ￼
-
-⸻
-
-1) Overview — full architecture (concrete)
-
-Screenshot (H × W × 3)
-  ↓ (patchify)
-ViT‑G/14 (frozen or finetuned)  →  patch embeddings  (N_patches × D_v)
-  ↓
-Q‑Former (learnable query tokens) — cross‑attends to ViT outputs
-  ↓
-Linear projection (Q‑former_dim → LLM_embed_dim)
-  ↓
-Prefix embeddings (K query embeddings) fed into LLM decoder as image prefix
-  ↓
-LLM (causal / encoder‑decoder) → autoregressive generation of JSON/XML tokens
-
-Components I recommend for maximum accuracy (no size constraint):
-	•	Vision encoder: laion/CLIP-ViT-g-14 (ViT‑G/14 weights).  ￼ ￼
-	•	Bridge / projection: Q‑Former (32–64 learnable queries, 12 Transformer layers, hidden dim ≈ 1408 or 2048) — same concept as BLIP‑2.  ￼ ￼
-	•	Projector: single Linear layer mapping Q‑Former output dimension → LLM embed dim (e.g. 4096 for T5‑XXL or 5120+ for Llama2 large variants).
-	•	LLM / decoder: T5‑XXL (encoder‑decoder) or a causal LLM like Llama‑2‑13B / 70B (if you prefer causal modeling). For best structure handling, T5‑XXL (encoder‑decoder) or Llama2‑70B give top performance (choose based on available infra).
-	•	Training adapters: use LoRA on LLM layers + train Q‑Former (recommended) so you only train a small fraction of params.  ￼ ￼
-
-⸻
-
-2) What each component does (practical specifics)
-	1.	ViT‑G/14 (vision encoder)
-	•	Input: resized screenshot (recommend 1024×1024 or 1344×1344 for fine UI detail).
-	•	Output: N × D_v patch embeddings (e.g., if 14×14 patches at 1024 → ~ (1024/14)² ≈ 538 patches). ViT‑G is wide/deep so it captures tiny UI details. Use pretrained OpenCLIP ViT‑G weights on HF.  ￼ ￼
-	2.	Q‑Former (learnable queries)
-	•	Learnable K query vectors (K = 32 or 64).
-	•	Each Q‑former block: self‑attention over queries + cross‑attention to ViT patch embeddings + feedforward. Use ~12 blocks (can be 6–12). Implementation reference: LAVIS / BLIP‑2 Q‑former code.  ￼
-	•	Output: K × D_q representations (semantic image summary tokens).
-	3.	Linear projection (the actual projection layer)
-	•	Single Linear(D_q → D_lm) that maps each of the K query outputs into the LLM embedding dimension. This is the projection you asked about — it turns Q‑former outputs into prefix embeddings understandable by the LLM.
-	•	If LLM uses positional embeddings for inputs, add positional encodings suited to prefix length K (or feed with inputs_embeds carefully — see HF notes about inputs_embeds behaviour).  ￼
-	4.	LLM / Text Decoder
-	•	Feed the projected K vectors as prefix embeddings to the LLM, then continue token generation conditioned on that prefix.
-	•	If using encoder‑decoder (T5): you can either (A) treat projected queries as additional encoder tokens (preferred — add them to encoder input), or (B) use them as prefix to decoder (less standard for T5). Many BLIP‑2/T5 variants prepend them to LLM context. LAVIS’ BLIP2‑T5 integration is a direct reference.  ￼
-	5.	LoRA / Adapters
-	•	Do not fine‑tune entire LLM. Attach LoRA adapters to attention & MLP projections (e.g. q_proj, k_proj, v_proj, o_proj, fc1) and train LoRA + Q‑former. This gives excellent accuracy vs compute tradeoff.
-	6.	Output
-	•	LLM generates tokenized JSON (or XML). Use constrained decoding / schema-checker postprocess to guarantee valid JSON/XML.
-
-⸻
-
-3) Exact recommended dimensions & hyper‑choices (concrete)
-	•	Image size: 1344×1344 (letterbox preserving aspect ratio) — keeps small UI text legible.
-	•	ViT‑G patch size: 14 (fixed). Use HF ViT‑G weights.  ￼
-	•	Q‑Former: K = 32 (start) or 64 (better), layers = 12, heads = 16, hidden_dim D_q = 1408 (match ViT hidden size or 1024–2048).  ￼
-	•	Projector: Linear(D_q, D_lm) (e.g., Linear(1408, 4096) for T5‑XXL)
-	•	LLM: T5‑XXL (11B) or Llama‑2‑13B/70B. If you want best accuracy and can host 70B, pick Llama‑2‑70B + LoRA (or full fine‑tune).
-	•	LoRA ranks: r = 64 for large LLMs (adjust down if memory constrained).
-	•	Batch & LR: LR Q‑former + LoRA 1e‑4 – 2e‑4, AdamW, weight decay 0.01, warmup 2–5% steps. Use mixed precision (fp16) or 8‑bit with bitsandbytes.
-	•	Steps: depends on dataset; for 100k pairs, aim 50–200k steps with checkpointing.
-
-⸻
-
-4) How to connect Q‑Former → LLM in code (practical)
-
-Two common patterns:
-
-A) Prefix‑embeds into LLM (causal LLMs)
-	•	Compute Q‑former outputs Q = [q1..qK] (shape K×D_q)
-	•	P = Linear(Q) → K×D_lm
-	•	When calling causal LLM, call generate or forward with inputs_embeds = concat(P, token_embeddings_of_prompt) — note HF behaviour: some models expect positional embeddings; test carefully. See HF issue about inputs_embeds.  ￼
-
-B) Encoder‑side injection (T5 / encoder‑decoder) — often cleaner:
-	•	Treat Q‑former outputs as encoder tokens by mapping them into encoder embedding dim and concatenating with text encoder inputs (or using a small multi‑modal encoder wrapper). LAVIS BLIP‑2 uses this approach for T5 in their blip2_t5.py.  ￼
-
-References / code to copy/adapt:
-	•	LAVIS BLIP‑2 implementation (Q‑former + T5 wiring).  ￼
-	•	HF BLIP‑2 docs and model examples.  ￼
-	•	Q‑Former standalone implementation (helpful) on GitHub.  ￼
-
-⸻
-
-5) Additional practicalities & improvements for UI tasks
-	1.	Auxiliary detection head (recommended)
-	•	Add a small detection/regression head on top of Q‑former outputs to predict precise bounding boxes (L1 loss). This helps numeric accuracy of bounds beyond tokenized coordinates. Train jointly (multi‑task loss: token CE + box L1). This combines best of detection + seq2seq.
-	2.	Tokenization of coords
-	•	Two options:
-	•	Keep coords as strings "100,200,300,260" — simpler, but numeric precision learned tokenwise.
-	•	Predict quantized coords as discrete tokens (e.g., 0–1000 mapped to tokens) — more robust but needs special tokenizer entries.
-	3.	Hierarchy
-	•	Train the LLM to output children arrays or parent indices to represent tree structure. Use containment heuristics as a fallback.
-	4.	Data
-	•	Pretrain Q‑former on image-caption and OCR tasks (BLIP‑2 style two‑stage pretrain) to bootstrap alignment. Then finetune on screenshot→JSON pairs. BLIP‑2 paper describes two stage training.  ￼
-	5.	Constrained decoding
-	•	Use grammar/schema checking (e.g. a JSON schema validator) to repair small tokenization mistakes.
-
-⸻
-
-6) Concrete starter resources (download & examples)
-	•	ViT‑G weights (OpenCLIP): laion/CLIP-ViT-g-14-laion2B-... on HuggingFace.  ￼
-	•	BLIP‑2 paper & description (Q‑Former concept): arXiv BLIP‑2.  ￼
-	•	LAVIS (Salesforce) implementation — BLIP‑2 + T5 wiring and Q‑Former code: salesforce/LAVIS on GitHub. Use their blip2_t5.py and Qformer.py as direct references.  ￼
-	•	Small Q‑former reimplementation for prototyping: kyegomez/qformer GitHub.  ￼
-
-⸻
-
-7) Minimal code sketch (pseudo / practical)
-
-This is a compact pseudocode to show the wiring:
-
-# pseudocode (conceptual)
-vision = CLIPVisionModel.from_pretrained("laion/CLIP-ViT-g-14")
-qformer = QFormer(num_queries=32, num_layers=12, dim=1408)   # see LAVIS QFormer
-proj = nn.Linear(1408, lm.config.hidden_size)               # project to LLM dim
-
-# LLM (T5 or Llama)
-lm = AutoModelForSeq2SeqLM.from_pretrained("google/t5-xxl")  # or causal LLM
-
-# forward for training:
-patch_feats = vision(pixel_values)           # [B, N, D_v]
-q_out = qformer(query_tokens, patch_feats)   # [B, K, D_q]
-prefix_embeds = proj(q_out)                  # [B, K, D_lm]
-
-# If using T5 encoder-decoder: inject prefix_embeds into encoder inputs or
-# run a tiny adapter that concatenates them with encoder tokens.
-# If using causal LLM: prepend prefix_embeds to token embeddings via inputs_embeds.
-
-outputs = lm(input_ids=..., inputs_embeds=..., labels=target_ids)
-loss = outputs.loss
-
-(Use LAVIS repo for exact shapes & integration.)
-
-⸻
-
-8) Training recipe (concise actionable)
-	•	Stage 0 (optional): Pretrain Q‑former on generic image→text (image captions + VQA) for 1–2 epochs. BLIP‑2 uses 2-stage.  ￼
-	•	Stage 1: Finetune Q‑former + LoRA adapters on your UI dataset (image → serialized JSON). Freeze vision & LLM initial layers if memory limited.
-	•	Losses: L_total = L_CE(tokens) + λ_box * L1(boxes) if you include box head. Set λ_box ~ 1.0.
-	•	Optim: AdamW, lr 1e‑4 (LoRA & Q‑former), batch size 32 effective (accumulation), mixed precision.
-	•	Eval: structural F1 (IoU > 0.5 + class match), coordinate MAE, attribute accuracies.
-
-⸻
-
-9) Deployment advice
-	•	Best accuracy: keep LLM on server, run inference via an API (mobile sends screenshot).
-	•	Edge/On‑device: export ViT‑G to ONNX/TensorRT for faster feature extraction; run smaller LLM or quantized LLM on edge (big accuracy drop).
-	•	Latency tricks: cache vision encoder outputs for identical UIs; use smaller K (32) for faster decoding.
-
-⸻
-
-10) Where to look next (I can prepare any of these)
-	•	Full runnable repo: BLIP‑2 (LAVIS) + custom training loop for screenshot→JSON (I can produce this).  ￼
-	•	Code to attach LoRA (PEFT) on any LLM and training scripts (Accelerate + bitsandbytes).
-	•	Example Q‑Former + T5 wiring adapted from lavis with specific config files.
-
-⸻
-
-If you want, I’ll now generate a runnable starter repo (Python) that wires:
-	•	laion/CLIP-ViT-g-14 as encoder,
-	•	LAVIS Q‑Former (K=32, 12 layers),
-	•	google/t5-xxl as decoder,
-	•	LoRA adapters on T5 attention,
-	•	training loop with token + optional bbox loss,
-	•	dataset loader that consumes your adb dumps (screenshots + uiautomator XML → JSON serializer).
-
-Tell me which LLM you want me to wire in the starter code (T5‑XXL, Llama‑2‑13B, or Llama‑2‑70B) and whether you have a multi‑GPU cluster (8×A100 / 4×A100 / single‑48GB). I’ll tailor the repo for that infra.
-
-
-
-
-
-
-Here’s a well-structured prompt you can use for an LLM or vision model to detect the On/Off states of quick setting toggles from a Samsung smartphone screenshot:
-
-⸻
-
-Prompt:
-
-You are given a screenshot of the dropdown Quick Settings panel from a Samsung smartphone.
-Identify all visible toggle elements such as:
-	•	Airplane Mode
-	•	Bluetooth
-	•	Wi-Fi
-	•	Mobile Data
-	•	Location
-	•	Do Not Disturb
-	•	Hotspot
-	•	Torch/Flashlight
-	•	Power Saving Mode
-	•	Any other visible quick setting icons
-
-For each detected element, return its name and current state (On or Off).
-
-Rules:
-	•	The name must exactly match the icon’s function (e.g., “Bluetooth” instead of “BT”).
-	•	The state should be On if the icon appears active (highlighted or colored) and Off if inactive (greyed out).
-	•	If an element is partially visible but recognizable, still include it.
-	•	Do not include elements that are not part of the quick settings panel.
-
-Output format (JSON):
-
-[
-  {"name": "Wi-Fi", "state": "On"},
-  {"name": "Bluetooth", "state": "Off"},
-  {"name": "Airplane Mode", "state": "Off"}
-]
-
-
-
-⸻
-
-If you want, I can also extend this prompt so that it works optimally with vision-language models like GPT-4o or Gemini, where the screenshot is passed as an image input. This way it will handle Samsung UI’s specific icon coloring and arrangement.
-
-Do you want me to make that extended version for Samsung’s One UI style?
-
-
-
-
-
-from transformers import AutoProcessor, AutoModelForVision2Seq
-from PIL import Image
-
-# Load processor and model
-model_id = "liuhaotian/llava-v1.5-13b"
-processor = AutoProcessor.from_pretrained(model_id)
-model = AutoModelForVision2Seq.from_pretrained(
-    model_id, 
-    torch_dtype="auto", 
-    device_map="auto"
-)
-
-# Load image
-image = Image.open("example.jpg")
-
-# Prompt
-prompt = "USER: Describe this image in detail. ASSISTANT:"
-
-# Preprocess
-inputs = processor(prompt, image, return_tensors="pt").to(model.device)
-
-# Generate
-output = model.generate(**inputs, max_new_tokens=200)
-print(processor.decode(output[0], skip_special_tokens=True))
-
-
 import torch
-from transformers import AutoProcessor, LlavaForConditionalGeneration
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torchvision import transforms, models
+from torch.utils.data import Dataset, DataLoader
 from PIL import Image
+import pandas as pd
+import os
+from tqdm import tqdm
 
-# Use the HF-compatible version
-model_id = "llava-hf/llava-1.5-13b-hf"
+# ----------------------------
+# MODEL DEFINITION
+# ----------------------------
+class UIStateDetector(nn.Module):
+    def __init__(self, num_classes=5, model_type="efficientnet_b2"):
+        super().__init__()
 
-# Load processor + model
-processor = AutoProcessor.from_pretrained(model_id)
-model = LlavaForConditionalGeneration.from_pretrained(
-    model_id,
-    torch_dtype=torch.float16,
-    device_map="auto"
-)
+        if model_type == "efficientnet_b2":
+            backbone = models.efficientnet_b2(weights="IMAGENET1K_V1")
+            self.visual_encoder = backbone.features
+            visual_out_dim = 1408
+        elif model_type == "vit_s":
+            backbone = models.vit_b_16(weights="IMAGENET1K_V1")
+            self.visual_encoder = nn.Sequential(*list(backbone.children())[:-1])
+            visual_out_dim = 768
+        else:
+            raise ValueError("Unknown model_type")
 
-# Load an image
-image = Image.open("example.jpg")
+        self.coord_encoder = nn.Sequential(
+            nn.Linear(4, 64),
+            nn.ReLU(),
+            nn.Linear(64, 128),
+            nn.ReLU(),
+        )
 
-# Prompt
-prompt = "USER: What’s in this image? ASSISTANT:"
+        self.classifier = nn.Sequential(
+            nn.Linear(visual_out_dim + 128, 512),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(512, num_classes),
+        )
 
-# Preprocess
-inputs = processor(prompt, image, return_tensors="pt").to(model.device)
+        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
 
-# Generate
-output = model.generate(**inputs, max_new_tokens=200)
-print(processor.decode(output[0], skip_special_tokens=True))
-
-
-
-
-
-1. Collaboration
-
-I actively collaborate across teams and functions, sharing insights and resources to achieve collective goals. I proactively support colleagues beyond my direct responsibilities, which helps drive smoother project execution and stronger team alignment.
-
-2. Communication
-
-I clearly communicate ideas, project updates, and outcomes to a variety of stakeholders. I adjust my approach based on the audience to ensure understanding, alignment, and faster decision-making.
-
-3. Continuous Learning
-
-I continuously develop my skills and stay updated with new tools, methods, and technologies relevant to our work. I bring fresh perspectives back to the team and apply them to improve processes and results.
-
-4. Decision-Making
-
-I make informed decisions using data and thorough analysis, weighing short- and long-term impacts. I involve the right stakeholders to ensure decisions align with organizational objectives.
-
-5. Driving Force
-
-I take full ownership of my tasks and follow through on deliverables. I anticipate challenges, manage dependencies proactively, and keep initiatives moving toward successful completion.
-
-6. Global Perspective
-
-I consider diverse viewpoints and adapt solutions for different markets and user needs. I value cultural differences and integrate global learnings into our projects to enhance results.
-
-7. Innovation
-
-I actively identify areas for improvement and bring forward creative, practical solutions. I embrace change and encourage innovative thinking within the team to unlock new opportunities.
-
-8. Problem-Solving
-
-I approach problems systematically, identifying root causes and exploring multiple solutions. I engage stakeholders early to ensure alignment and effective implementation.
-
-9. Quality Focus
-
-I consistently seek feedback to improve work quality. I apply lessons learned to deliver more reliable, efficient, and user-focused outcomes aligned with Samsung’s commitment to excellence.
-
-10. Risk Management
-
-I proactively identify and communicate risks early, balancing opportunities and potential impacts. I recommend mitigation strategies to ensure smooth project execution and stable outcomes.
+    def forward(self, image, coords):
+        vision_feat = self.visual_encoder(image)            # [B, C, H', W']
+        vision_feat = self.global_pool(vision_feat)          # [B, C, 1, 1]
+        vision_feat = vision_feat.view(vision_feat.size(0), -1)  # [B, C]
+        coord_feat = self.coord_encoder(coords)              # [B, 128]
+        fused = torch.cat([vision_feat, coord_feat], dim=-1) # [B, C+128]
+        logits = self.classifier(fused)                      # [B, num_classes]
+        return logits
 
 
+# ----------------------------
+# DATASET DEFINITION
+# ----------------------------
+class UIScreenshotDataset(Dataset):
+    def __init__(self, csv_path, img_dir, label2id, transform=None):
+        self.data = pd.read_csv(csv_path)
+        self.img_dir = img_dir
+        self.transform = transform
+        self.label2id = label2id
 
-I consistently contribute to achieving Samsung’s goals by collaborating across teams, communicating clearly, and driving innovation with a global outlook. I take ownership of deliverables, apply continuous learning, and ensure quality outcomes while proactively managing risks. My approach supports Samsung’s commitment to excellence and customer-focused innovation
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        row = self.data.iloc[idx]
+        img_path = os.path.join(self.img_dir, row["image_path"])
+        image = Image.open(img_path).convert("RGB")
+
+        # Coordinates and normalization
+        x1, y1, x2, y2 = row["x1"], row["y1"], row["x2"], row["y2"]
+        screen_w, screen_h = row["screen_w"], row["screen_h"]
+        coords = torch.tensor([
+            x1 / screen_w,
+            y1 / screen_h,
+            x2 / screen_w,
+            y2 / screen_h
+        ], dtype=torch.float32)
+
+        label = torch.tensor(self.label2id[row["label"]], dtype=torch.long)
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image, coords, label
 
 
+# ----------------------------
+# TRAINING SCRIPT
+# ----------------------------
+def train_model(csv_train, img_dir, label_list, num_epochs=10, batch_size=8, lr=2e-4, model_type="efficientnet_b2"):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
-@echo off
-echo ================================================
-echo   Wiping Android Studio, SDK, Gradle caches…
-echo ================================================
+    label2id = {label: i for i, label in enumerate(label_list)}
 
-REM Hard-coded for user m.sneh
-SET USERDIR=C:\Users\m.sneh
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406],
+                             [0.229, 0.224, 0.225]),
+    ])
 
-echo.
-echo Deleting Android Studio config folders…
-rmdir /S /Q "%USERDIR%\.AndroidStudio*"
-rmdir /S /Q "%USERDIR%\AppData\Roaming\Google\AndroidStudio*"
-rmdir /S /Q "%USERDIR%\AppData\Local\Google\AndroidStudio*"
+    dataset = UIScreenshotDataset(csv_train, img_dir, label2id, transform)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4)
 
-echo.
-echo Deleting Android SDK folder…
-rmdir /S /Q "%USERDIR%\AppData\Local\Android"
+    model = UIStateDetector(num_classes=len(label_list), model_type=model_type).to(device)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
 
-echo.
-echo Deleting .android folder (AVDs, settings)…
-rmdir /S /Q "%USERDIR%\.android"
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss, correct, total = 0, 0, 0
 
-echo.
-echo Deleting Gradle cache…
-rmdir /S /Q "%USERDIR%\.gradle"
+        for images, coords, labels in tqdm(loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
+            images, coords, labels = images.to(device), coords.to(device), labels.to(device)
+            optimizer.zero_grad()
+            logits = model(images, coords)
+            loss = F.cross_entropy(logits, labels)
+            loss.backward()
+            optimizer.step()
 
-echo.
-echo ================================================
-echo   Done. All specified folders removed.
-echo ================================================
-pause
+            total_loss += loss.item()
+            preds = torch.argmax(logits, dim=-1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+
+        acc = correct / total * 100
+        avg_loss = total_loss / len(loader)
+        print(f"Epoch {epoch+1} | Loss: {avg_loss:.4f} | Accuracy: {acc:.2f}%")
+
+    torch.save(model.state_dict(), "ui_state_detector.pth")
+    print("✅ Model saved as ui_state_detector.pth")
+
+# ----------------------------
+# USAGE EXAMPLE
+# ----------------------------
+if __name__ == "__main__":
+    # Your CSV file should include: image_path, x1, y1, x2, y2, screen_w, screen_h, label
+    csv_train = "data/train.csv"
+    img_dir = "data/images"
+    label_list = ["ON", "OFF", "DISABLED", "SELECTED", "UNSELECTED"]
+
+    train_model(csv_train, img_dir, label_list, num_epochs=10, batch_size=8)
