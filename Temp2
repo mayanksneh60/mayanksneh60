@@ -1,35 +1,99 @@
-private fun traverseAndLogViewNode(node: AssistStructure.ViewNode, depth: Int = 0) {
-    val indent = " ".repeat(depth * 2)
+import torch
+import torch.nn as nn
+from torchvision import models, transforms
+from PIL import Image
 
-    Log.d("AutofillDump", "${indent}ViewNode:")
-    Log.d("AutofillDump", "${indent}  idEntry: ${node.idEntry}")
-    Log.d("AutofillDump", "${indent}  idPackage: ${node.idPackage}")
-    Log.d("AutofillDump", "${indent}  idType: ${node.idType}")
-    Log.d("AutofillDump", "${indent}  className: ${node.className}")
-    Log.d("AutofillDump", "${indent}  hint: ${node.hint}")
-    Log.d("AutofillDump", "${indent}  text: ${node.text}")
-    Log.d("AutofillDump", "${indent}  autofillHints: ${node.autofillHints?.joinToString()}")
-    Log.d("AutofillDump", "${indent}  autofillType: ${node.autofillType}")
-    Log.d("AutofillDump", "${indent}  autofillValue: ${node.autofillValue}")
-    Log.d("AutofillDump", "${indent}  contentDescription: ${node.contentDescription}")
-    Log.d("AutofillDump", "${indent}  htmlInfo: ${node.htmlInfo}")
-    Log.d("AutofillDump", "${indent}  importantForAutofill: ${node.importantForAutofill}")
-    Log.d("AutofillDump", "${indent}  inputType: ${node.inputType}")
-    Log.d("AutofillDump", "${indent}  isEnabled: ${node.isEnabled}")
-    Log.d("AutofillDump", "${indent}  isFocused: ${node.isFocused}")
-    Log.d("AutofillDump", "${indent}  webDomain: ${node.webDomain}")
-    Log.d("AutofillDump", "${indent}  webScheme: ${node.webScheme}")
-    Log.d("AutofillDump", "${indent}  webDomain: ${node.webDomain}")
-    Log.d("AutofillDump", "${indent}  url: ${node.webDomain}")
+# ----------------------------
+# MODEL DEFINITION (same as training)
+# ----------------------------
+class UIStateDetector(nn.Module):
+    def __init__(self, num_classes=5, model_type="efficientnet_b2"):
+        super().__init__()
 
-    // Dump extras if available
-    node.extras?.let {
-        Log.d("AutofillDump", "${indent}  extras: $it")
-    }
+        if model_type == "efficientnet_b2":
+            backbone = models.efficientnet_b2(weights=None)
+            state_dict = torch.load("efficientnet_b2_rwightman-c35c1473.pth", map_location="cpu")
+            backbone.load_state_dict(state_dict)
+            self.visual_encoder = backbone.features
+            visual_out_dim = 1408
+        else:
+            raise ValueError("Unknown model_type")
 
-    // Traverse children
-    val childrenSize = node.childCount
-    for (i in 0 until childrenSize) {
-        traverseAndLogViewNode(node.getChildAt(i), depth + 1)
-    }
-}
+        self.coord_encoder = nn.Sequential(
+            nn.Linear(4, 64),
+            nn.ReLU(),
+            nn.Linear(64, 128),
+            nn.ReLU(),
+        )
+
+        self.classifier = nn.Sequential(
+            nn.Linear(visual_out_dim + 128, 512),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(512, num_classes),
+        )
+
+        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
+
+    def forward(self, image, coords):
+        vision_feat = self.visual_encoder(image)
+        vision_feat = self.global_pool(vision_feat)
+        vision_feat = vision_feat.view(vision_feat.size(0), -1)
+        coord_feat = self.coord_encoder(coords)
+        fused = torch.cat([vision_feat, coord_feat], dim=-1)
+        logits = self.classifier(fused)
+        return logits
+
+
+# ----------------------------
+# INFERENCE FUNCTION
+# ----------------------------
+def infer(image_path, coords, screen_w, screen_h, label_list):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Load model
+    model = UIStateDetector(num_classes=len(label_list)).to(device)
+    model.load_state_dict(torch.load("ui_state_detector.pth", map_location=device))
+    model.eval()
+
+    # Image preprocessing (same as training)
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406],
+                             [0.229, 0.224, 0.225]),
+    ])
+
+    image = Image.open(image_path).convert("RGB")
+    image = transform(image).unsqueeze(0).to(device)
+
+    # Normalize coordinates
+    x1, y1, x2, y2 = coords
+    coord_tensor = torch.tensor([[
+        x1 / screen_w,
+        y1 / screen_h,
+        x2 / screen_w,
+        y2 / screen_h
+    ]], dtype=torch.float32).to(device)
+
+    # Predict
+    with torch.no_grad():
+        logits = model(image, coord_tensor)
+        pred_id = torch.argmax(logits, dim=-1).item()
+        pred_label = label_list[pred_id]
+
+    print(f"🧩 Predicted State: {pred_label}")
+    return pred_label
+
+
+# ----------------------------
+# EXAMPLE USAGE
+# ----------------------------
+if __name__ == "__main__":
+    label_list = ["ON", "OFF", "DISABLED", "SELECTED", "UNSELECTED"]
+
+    image_path = "data/images/sample_screenshot.jpg"  # path to your screenshot
+    coords = (320, 1400, 420, 1500)                   # example bounding box (x1, y1, x2, y2)
+    screen_w, screen_h = 1080, 2400                   # actual device screen size
+
+    infer(image_path, coords, screen_w, screen_h, label_list)
