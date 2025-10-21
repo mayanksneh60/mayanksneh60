@@ -1,3 +1,58 @@
+UI State Detection Flow
+
+1️⃣ Input Stage
+
+Inputs:
+	•	📱 Full UI screenshot (RGB image)
+	•	🔲 Coordinates of the UI element: (x1, y1, x2, y2)
+	•	📏 Screen dimensions: (screen_w, screen_h)
+
+🧩 Goal: To tell the model which UI element on the screen to analyze.
+
+⸻
+
+2️⃣ Preprocessing Stage
+	•	🖼️ Image is resized to 224×224
+	•	🎨 Image is normalized (same as ImageNet mean/std)
+	•	🔢 Coordinates are normalized by dividing with screen_w and screen_h
+→ ensures values are between 0–1 and device-independent.
+
+⸻
+
+3️⃣ Feature Extraction
+
+🔹 Visual Encoder
+	•	Uses EfficientNet-B2 (pretrained backbone)
+	•	Extracts visual features from the screenshot
+	•	Outputs a 1408-dimensional vector representing the visual context.
+
+🔹 Coordinate Encoder
+	•	Small feed-forward network (MLP)
+	•	Converts normalized coordinates → 128-dimensional vector.
+
+⸻
+
+4️⃣ Fusion + Classification
+
+🔗 Both encoded vectors are concatenated → [Visual Features + Coordinate Features]
+🔻
+Then passed through a Classifier Head:
+	•	Dense → ReLU → Dropout → Dense
+	•	Outputs logits for each class (e.g., ON, OFF, DISABLED, etc.)
+
+⸻
+
+5️⃣ Output Stage
+	•	🔍 Model predicts the most probable UI state
+
+
+
+
+
+
+
+
+
 import torch
 import torch.nn as nn
 from torchvision import models, transforms
