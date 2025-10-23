@@ -1,3 +1,56 @@
+import csv
+
+# Define your 13 UI elements and their coordinates here
+# Example structure: element_name: (x1, y1, x2, y2)
+ui_elements = {
+    "button_play": (100, 200, 200, 300),
+    "button_pause": (210, 200, 310, 300),
+    "button_stop": (320, 200, 420, 300),
+    "icon_settings": (50, 50, 120, 120),
+    "slider_volume": (150, 400, 950, 420),
+    "text_title": (100, 100, 600, 160),
+    "icon_home": (10, 2000, 120, 2100),
+    "icon_back": (10, 100, 100, 180),
+    "tab_recent": (400, 2200, 600, 2250),
+    "tab_favorites": (650, 2200, 850, 2250),
+    "button_next": (900, 2100, 1050, 2200),
+    "button_prev": (50, 2100, 200, 2200),
+    "icon_user": (950, 50, 1050, 150)
+}
+
+INPUT_CSV = "input.csv"
+OUTPUT_CSV = "output.csv"
+
+SCREEN_WIDTH = 1080
+SCREEN_HEIGHT = 2340
+
+# Read input and generate output
+with open(INPUT_CSV, newline='') as infile, open(OUTPUT_CSV, 'w', newline='') as outfile:
+    reader = csv.reader(infile)
+    writer = csv.writer(outfile)
+
+    # Write header (optional)
+    writer.writerow(["image_name", "x1", "y1", "x2", "y2", "width", "height", "state"])
+
+    for row in reader:
+        if len(row) < 2:
+            continue  # skip invalid lines
+        
+        img_name = row[0].strip()
+        # Allow multiple ON elements in one row
+        on_elements = {elem.strip() for elem in row[1:] if elem.strip()}
+
+        for element_name, (x1, y1, x2, y2) in ui_elements.items():
+            state = "ON" if element_name in on_elements else "OFF"
+            writer.writerow([img_name, x1, y1, x2, y2, SCREEN_WIDTH, SCREEN_HEIGHT, state])
+
+print(f"✅ Output written to {OUTPUT_CSV}")
+
+
+
+
+
+
 UI State Detection Flow
 
 1️⃣ Input Stage
