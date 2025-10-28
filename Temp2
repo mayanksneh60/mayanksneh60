@@ -1,412 +1,45 @@
-from sklearn.model_selection import train_test_split
-
-def train_model(csv_train, img_dir, label_list, num_epochs=50, batch_size=8, lr=2e-4, model_type="efficientnet_b2"):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-
-    label2id = {label: i for i, label in enumerate(label_list)}
-
-    # Transformations (same for train/val)
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406],
-                             [0.229, 0.224, 0.225]),
-    ])
-
-    # Load CSV
-    full_df = pd.read_csv(csv_train)
-
-    # Train-validation split (90% train, 10% val)
-    train_df, val_df = train_test_split(full_df, test_size=0.1, random_state=42, shuffle=True)
-
-    train_dataset = UIScreenshotDataset(None, img_dir, label2id, transform)
-    val_dataset = UIScreenshotDataset(None, img_dir, label2id, transform)
-
-    train_dataset.data = train_df.reset_index(drop=True)
-    val_dataset.data = val_df.reset_index(drop=True)
-
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
-
-    # Model
-    model = UIStateDetector(num_classes=len(label_list), model_type=model_type).to(device)
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-
-    best_val_loss = float("inf")
-    patience, patience_counter = 5, 0  # stop if no improvement for 5 epochs
-
-    for epoch in range(num_epochs):
-        # -------------------- TRAIN --------------------
-        model.train()
-        total_loss, correct, total = 0, 0, 0
-
-        for images, coords, labels in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]"):
-            images, coords, labels = images.to(device), coords.to(device), labels.to(device)
-            optimizer.zero_grad()
-            logits = model(images, coords)
-            loss = F.cross_entropy(logits, labels)
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-            preds = torch.argmax(logits, dim=-1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
-
-        train_acc = correct / total * 100
-        avg_train_loss = total_loss / len(train_loader)
-
-        # -------------------- VALIDATION --------------------
-        model.eval()
-        val_loss, val_correct, val_total = 0, 0, 0
-        with torch.no_grad():
-            for images, coords, labels in tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Val]"):
-                images, coords, labels = images.to(device), coords.to(device), labels.to(device)
-                logits = model(images, coords)
-                loss = F.cross_entropy(logits, labels)
-                val_loss += loss.item()
-                preds = torch.argmax(logits, dim=-1)
-                val_correct += (preds == labels).sum().item()
-                val_total += labels.size(0)
-
-        avg_val_loss = val_loss / len(val_loader)
-        val_acc = val_correct / val_total * 100
-
-        print(f"Epoch {epoch+1}: "
-              f"Train Loss {avg_train_loss:.4f} | Train Acc {train_acc:.2f}% || "
-              f"Val Loss {avg_val_loss:.4f} | Val Acc {val_acc:.2f}%")
-
-        # -------------------- EARLY STOPPING --------------------
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            patience_counter = 0
-            torch.save(model.state_dict(), "best_ui_state_detector.pth")
-            print("💾 Saved best model (val loss improved)")
-        else:
-            patience_counter += 1
-            print(f"⚠️ No improvement ({patience_counter}/{patience})")
-
-            if patience_counter >= patience:
-                print("⏹️ Early stopping triggered!")
-                break
-
-    print("✅ Training complete. Best model saved as 'best_ui_state_detector.pth'")
-
-
-
-6.jpg,flashlight,data
-7.jpg,powersaving,nightmode
-8.jpg,bt,quickshare
-9.jpg,wifi,airplanemode
-10.jpg,hotspot,dnd
-11.jpg,location,eyecomfort
-12.jpg,portrait,flashlight
-13.jpg,portrait,data
-14.jpg,wifi
-15.jpg,bt
-16.jpg,nightmode
-17.jpg,dnd
-18.jpg,eyecomfort
-19.jpg,bt,quickshare
-20.jpg,location
-21.jpg,powersaving,nightmode
-22.jpg,hotspot
-23.jpg,data
-24.jpg,flashlight
-25.jpg,airplanemode
-26.jpg,portrait
-27.jpg,wifi,portrait,data,location,eyecomfort,nightmode
-28.jpg,wifi,portrait,data,eyecomfort,dnd,nightmode
-29.jpg,wifi,portrait,data,eyecomfort,dnd
-30.jpg,wifi,portrait,data,eyecomfort
-31.jpg,wifi,bt,airplanemode,flashlight,location,eyecomfort
-32.jpg,wifi,portrait,data
-33.jpg,wifi,data
-34.jpg,wifi,flashlight
-35.jpg,wifi,portrait
-36.jpg,wifi,bt,portrait,quickshare
-37.jpg,wifi,bt,portrait,data,quickshare
-38.jpg,wifi,bt,portrait,airplanemode,quickshare
-39.jpg,wifi,bt,portrait,airplanemode,powersaving,quickshare,nightmode
-40.jpg,wifi,bt,portrait,airplanemode,powersaving,quickshare,dnd,nightmode
-41.jpg,wifi,bt,portrait,airplanemode,powersaving,dnd,nightmode
-42.jpg,wifi,bt,portrait,airplanemode,powersaving,nightmode
-43.jpg,wifi,bt,portrait,airplanemode
-44.jpg,wifi,bt,portrait,airplanemode,flashlight
-45.jpg,wifi,bt,portrait,airplanemode,flashlight,location
-46.jpg,wifi,bt,airplanemode,flashlight,location
-47.jpg,wifi,bt,airplanemode,location
-48.jpg,wifi,bt,airplanemode,eyecomfort
-49.jpg,wifi,bt,airplanemode,flashlight,location,eyecomfort
-50.jpg,wifi,bt,airplanemode,location,eyecomfort
-51.jpg,wifi,airplanemode,location,eyecomfort
-52.jpg,wifi,bt,data,hotspot,location,eyecomfort
-53.jpg,wifi,bt,data,hotspot,location,quickshare,eyecomfort
-54.jpg,wifi,bt,flashlight,data,hotspot,location,quickshare,eyecomfort
-55.jpg,wifi,bt,flashlight,data,hotspot,location,quickshare,eyecomfort,dnd,nightmode
-56.jpg,wifi,bt,flashlight,data,hotspot,location,quickshare,eyecomfort,nightmode
-57.jpg,wifi,bt,portrait,flashlight,data,hotspot,location,quickshare,eyecomfort,nightmode
-58.jpg,wifi,bt,portrait,data,hotspot,location,quickshare,eyecomfort,nightmode
-59.jpg,wifi,bt,data,hotspot,location,quickshare,eyecomfort,nightmode
-60.jpg,wifi,bt,data,hotspot,location,eyecomfort,dnd,nightmode
-61.jpg,wifi,bt,data,hotspot,location,eyecomfort,nightmode
-62.jpg,wifi,data,hotspot,location,eyecomfort,nightmode
-63.jpg,wifi,data,hotspot,location,eyecomfort,nightmode
-64.jpg,wifi,location,eyecomfort,nightmode
-65.jpg,wifi,bt,location,eyecomfort,nightmode
-66.jpg,wifi,bt,eyecomfort,nightmode
-67.jpg,wifi,bt,dnd,nightmode
-68.jpg,wifi,bt,nightmode
-69.jpg,wifi,data,nightmode
-70.jpg,bt,data,nightmode
-71.jpg,portrait,data,nightmode
-72.jpg,portrait,data,location,nightmode
-73.jpg,bt,portrait,data,location,nightmode
-74.jpg,bt,portrait,flashlight,data,location,nightmode
-75.jpg,bt,portrait,flashlight,data,powersaving,location,nightmode
-76.jpg,bt,portrait,data,powersaving,location,nightmode
-77.jpg,bt,data,location,quickshare,nightmode
-78.jpg,data,location,nightmode
-79.jpg,data,location,eyecomfort,dnd,nightmode
-80.jpg,data,location,eyecomfort,nightmode
-81.jpg,powersaving,location,nightmode
-82.jpg,powersaving,location,dnd,nightmode
-83.jpg,data,powersaving,location,dnd,nightmode
-84.jpg,portrait,data,powersaving,location,dnd,nightmode
-85.jpg,portrait,data,location,dnd,nightmode
-86.jpg,data,location,dnd,nightmode
-87.jpg,bt,data,location,quickshare,dnd,nightmode
-88.jpg,wifi,bt,portrait,data,powersaving,location,dnd,nightmode
-89.jpg,wifi,bt,portrait,data,powersaving,nightmode
-90.jpg,wifi,bt,portrait,data
-91.jpg,wifi,data
-92.jpg,wifi,data,location
-93.jpg,wifi,portrait,airplanemode,flashlight,powersaving,location,dnd,nightmode
-94.jpg,wifi,portrait,flashlight,hotspot,powersaving,location,dnd,nightmode
-95.jpg,wifi,portrait,hotspot,powersaving,location,dnd,nightmode
-96.jpg,wifi,portrait,hotspot,powersaving,dnd,nightmode
-97.jpg,wifi,portrait,hotspot,dnd,nightmode
-98.jpg,wifi,portrait,dnd,nightmode
-99.jpg,wifi,portrait,nightmode
-100.jpg,wifi,location,nightmode
-
-
-
-
-
-
-
-
-
-
-
-
-import csv
-
-# Define your 13 UI elements and their coordinates here
-# Example structure: element_name: (x1, y1, x2, y2)
-ui_elements = {
-    "button_play": (100, 200, 200, 300),
-    "button_pause": (210, 200, 310, 300),
-    "button_stop": (320, 200, 420, 300),
-    "icon_settings": (50, 50, 120, 120),
-    "slider_volume": (150, 400, 950, 420),
-    "text_title": (100, 100, 600, 160),
-    "icon_home": (10, 2000, 120, 2100),
-    "icon_back": (10, 100, 100, 180),
-    "tab_recent": (400, 2200, 600, 2250),
-    "tab_favorites": (650, 2200, 850, 2250),
-    "button_next": (900, 2100, 1050, 2200),
-    "button_prev": (50, 2100, 200, 2200),
-    "icon_user": (950, 50, 1050, 150)
-}
-
-INPUT_CSV = "input.csv"
-OUTPUT_CSV = "output.csv"
-
-SCREEN_WIDTH = 1080
-SCREEN_HEIGHT = 2340
-
-# Read input and generate output
-with open(INPUT_CSV, newline='') as infile, open(OUTPUT_CSV, 'w', newline='') as outfile:
-    reader = csv.reader(infile)
-    writer = csv.writer(outfile)
-
-    # Write header (optional)
-    writer.writerow(["image_name", "x1", "y1", "x2", "y2", "width", "height", "state"])
-
-    for row in reader:
-        if len(row) < 2:
-            continue  # skip invalid lines
-        
-        img_name = row[0].strip()
-        # Allow multiple ON elements in one row
-        on_elements = {elem.strip() for elem in row[1:] if elem.strip()}
-
-        for element_name, (x1, y1, x2, y2) in ui_elements.items():
-            state = "ON" if element_name in on_elements else "OFF"
-            writer.writerow([img_name, x1, y1, x2, y2, SCREEN_WIDTH, SCREEN_HEIGHT, state])
-
-print(f"✅ Output written to {OUTPUT_CSV}")
-
-
-
-
-
-
-UI State Detection Flow
-
-1️⃣ Input Stage
-
-Inputs:
-	•	📱 Full UI screenshot (RGB image)
-	•	🔲 Coordinates of the UI element: (x1, y1, x2, y2)
-	•	📏 Screen dimensions: (screen_w, screen_h)
-
-🧩 Goal: To tell the model which UI element on the screen to analyze.
-
-⸻
-
-2️⃣ Preprocessing Stage
-	•	🖼️ Image is resized to 224×224
-	•	🎨 Image is normalized (same as ImageNet mean/std)
-	•	🔢 Coordinates are normalized by dividing with screen_w and screen_h
-→ ensures values are between 0–1 and device-independent.
-
-⸻
-
-3️⃣ Feature Extraction
-
-🔹 Visual Encoder
-	•	Uses EfficientNet-B2 (pretrained backbone)
-	•	Extracts visual features from the screenshot
-	•	Outputs a 1408-dimensional vector representing the visual context.
-
-🔹 Coordinate Encoder
-	•	Small feed-forward network (MLP)
-	•	Converts normalized coordinates → 128-dimensional vector.
-
-⸻
-
-4️⃣ Fusion + Classification
-
-🔗 Both encoded vectors are concatenated → [Visual Features + Coordinate Features]
-🔻
-Then passed through a Classifier Head:
-	•	Dense → ReLU → Dropout → Dense
-	•	Outputs logits for each class (e.g., ON, OFF, DISABLED, etc.)
-
-⸻
-
-5️⃣ Output Stage
-	•	🔍 Model predicts the most probable UI state
-
-
-
-
-
-
-
-
-
-import torch
-import torch.nn as nn
-from torchvision import models, transforms
+import os
 from PIL import Image
 
-# ----------------------------
-# MODEL DEFINITION (same as training)
-# ----------------------------
-class UIStateDetector(nn.Module):
-    def __init__(self, num_classes=5, model_type="efficientnet_b2"):
-        super().__init__()
+def downscale_images(input_folder):
+    # Create output folders in same directory as input folder
+    parent_dir = os.path.dirname(os.path.abspath(input_folder))
+    half_folder = os.path.join(parent_dir, "scaled_half")
+    quarter_folder = os.path.join(parent_dir, "scaled_quarter")
 
-        if model_type == "efficientnet_b2":
-            backbone = models.efficientnet_b2(weights=None)
-            state_dict = torch.load("efficientnet_b2_rwightman-c35c1473.pth", map_location="cpu")
-            backbone.load_state_dict(state_dict)
-            self.visual_encoder = backbone.features
-            visual_out_dim = 1408
-        else:
-            raise ValueError("Unknown model_type")
+    os.makedirs(half_folder, exist_ok=True)
+    os.makedirs(quarter_folder, exist_ok=True)
 
-        self.coord_encoder = nn.Sequential(
-            nn.Linear(4, 64),
-            nn.ReLU(),
-            nn.Linear(64, 128),
-            nn.ReLU(),
-        )
+    # Supported image extensions
+    valid_ext = ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
 
-        self.classifier = nn.Sequential(
-            nn.Linear(visual_out_dim + 128, 512),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(512, num_classes),
-        )
+    # Iterate over images in input folder
+    for filename in os.listdir(input_folder):
+        if filename.lower().endswith(valid_ext):
+            img_path = os.path.join(input_folder, filename)
+            try:
+                with Image.open(img_path) as img:
+                    w, h = img.size
 
-        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
+                    # Downscale 1/2
+                    half_img = img.resize((w // 2, h // 2), Image.LANCZOS)
+                    half_img.save(os.path.join(half_folder, filename))
 
-    def forward(self, image, coords):
-        vision_feat = self.visual_encoder(image)
-        vision_feat = self.global_pool(vision_feat)
-        vision_feat = vision_feat.view(vision_feat.size(0), -1)
-        coord_feat = self.coord_encoder(coords)
-        fused = torch.cat([vision_feat, coord_feat], dim=-1)
-        logits = self.classifier(fused)
-        return logits
+                    # Downscale 1/4
+                    quarter_img = img.resize((w // 4, h // 4), Image.LANCZOS)
+                    quarter_img.save(os.path.join(quarter_folder, filename))
 
+                    print(f"✅ Processed: {filename}")
+            except Exception as e:
+                print(f"⚠️ Skipped {filename} — {e}")
 
-# ----------------------------
-# INFERENCE FUNCTION
-# ----------------------------
-def infer(image_path, coords, screen_w, screen_h, label_list):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("\nAll done!")
+    print(f"Half-size images → {half_folder}")
+    print(f"Quarter-size images → {quarter_folder}")
 
-    # Load model
-    model = UIStateDetector(num_classes=len(label_list)).to(device)
-    model.load_state_dict(torch.load("ui_state_detector.pth", map_location=device))
-    model.eval()
-
-    # Image preprocessing (same as training)
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406],
-                             [0.229, 0.224, 0.225]),
-    ])
-
-    image = Image.open(image_path).convert("RGB")
-    image = transform(image).unsqueeze(0).to(device)
-
-    # Normalize coordinates
-    x1, y1, x2, y2 = coords
-    coord_tensor = torch.tensor([[
-        x1 / screen_w,
-        y1 / screen_h,
-        x2 / screen_w,
-        y2 / screen_h
-    ]], dtype=torch.float32).to(device)
-
-    # Predict
-    with torch.no_grad():
-        logits = model(image, coord_tensor)
-        pred_id = torch.argmax(logits, dim=-1).item()
-        pred_label = label_list[pred_id]
-
-    print(f"🧩 Predicted State: {pred_label}")
-    return pred_label
-
-
-# ----------------------------
-# EXAMPLE USAGE
-# ----------------------------
 if __name__ == "__main__":
-    label_list = ["ON", "OFF", "DISABLED", "SELECTED", "UNSELECTED"]
-
-    image_path = "data/images/sample_screenshot.jpg"  # path to your screenshot
-    coords = (320, 1400, 420, 1500)                   # example bounding box (x1, y1, x2, y2)
-    screen_w, screen_h = 1080, 2400                   # actual device screen size
-
-    infer(image_path, coords, screen_w, screen_h, label_list)
+    folder = input("Enter path of your image folder: ").strip()
+    if os.path.isdir(folder):
+        downscale_images(folder)
+    else:
+        print("❌ Invalid folder path.")
