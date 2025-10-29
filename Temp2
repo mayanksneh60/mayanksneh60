@@ -1,3 +1,16 @@
+from PIL import Image
+
+def resize_with_padding(img, target_size=224):
+    w, h = img.size
+    scale = target_size / max(w, h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    img = img.resize((new_w, new_h))
+    
+    new_img = Image.new("RGB", (target_size, target_size), (0, 0, 0))
+    new_img.paste(img, ((target_size - new_w) // 2, (target_size - new_h) // 2))
+    return new_img
+
+
 import os
 from PIL import Image
 
