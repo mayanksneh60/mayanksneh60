@@ -1,27 +1,56 @@
-Project Deliverables (Self Evaluation)
-	•	Developed an Intention Engine achieving 88% ROUGE score for general intention generation and classification, improving overall intent understanding accuracy.
-	•	Designed and implemented an Agentic Framework with a Prompt Builder and Action Executor module. Initially used a simple broadcast-based client–host communication setup and later enhanced it with an MCP client–server architecture to support multi-server interaction.
-	•	Created a UI Layout Library Testing Framework to evaluate and validate different layout generation libraries.
-	•	Conducted detailed testing and comparison across multiple UI layout libraries (including SFM release and Layout Framework), identified their limitations, and benchmarked results against UI Automator outputs for better consistency.
-	•	Explored screen navigation feasibility using LLMs (including Gemini) from screenshots, contributing to a deeper understanding of vision-based UI navigation possibilities.
-	•	Implemented a Form Autofill Service capable of detecting and injecting data into form fields to automate repetitive tasks.
-	•	Explored multiple approaches for UI Element State Detection before implementing the most effective one, achieving 85% accuracy on the Quick Settings Panel, with plans to expand to other screens.
-	•	Ensured requirements were properly discussed and analyzed before finalizing development plans, reducing iterations and improving implementation quality.
-	•	Evaluated multiple solution approaches before selecting the most efficient and maintainable design for each task.
-	•	Delivered assigned tasks on time and ensured no blocking or critical issues were raised during development or integration.
-	•	Maintained a focus on quality, timely delivery, and collaboration, ensuring smooth progress across all assigned modules.
+import json
+import os
 
-Self Development (Self Evaluation)
-	•	Completed a Prompt Engineering Certification, strengthening my understanding of prompt design strategies and optimization techniques.
-	•	Explored and utilized multiple Large Language Models (LLMs) for intention generation and classification during the development of the Intention Engine, gaining hands-on experience in model behavior analysis and fine-tuning.
-	•	Gained practical experience in prompt engineering through the design and implementation of the Prompt Builder module within the Agentic Framework.
-	•	Learned and experimented with various Vision AI models and techniques for screen layout understanding and UI element state detection, enhancing skills in multimodal AI applications.
-	•	Currently preparing for the Workera AI Expert certification to further deepen my technical expertise and stay aligned with industry standards.
-Value Creation to Company (Self Evaluation)
-	•	Contributed to the patent idea “Personalised App Navigator Agent with Human Feedback Reinforcement Learning,” aimed at enhancing intelligent automation and personalized user interaction.
-	•	Developed and demonstrated the Intention Engine PoC for intention generation and classification, aiming to enhance user experience through more personalized and context-aware suggestions.
-	•	Designed and implemented the Agentic Framework PoC for screen navigation automation, showcasing the potential of LLM-driven UI control and interaction.
-	•	Currently working on the UI Element State Detection PoC to enable better screen understanding and improve automation accuracy across diverse UI layouts.
-	•	Explored multiple solution approaches for each assigned problem to identify the most effective and scalable options, ensuring outcomes that benefit both the company’s innovation goals and customer experience.
+original_json_path = "path/to/original_coco.json"
+images_folder = "path/to/filtered_images_folder"
+output_json_path = "path/to/filtered_with_new_ids.json"
 
-Focused on delivering high-quality solutions across multiple AI-driven initiatives, continuously upskilling through certifications and hands-on experimentation, and contributing to innovation through PoCs and patent ideas aimed at enhancing user experience and automation capabilities.
+# Load original COCO
+with open(original_json_path, "r") as f:
+    coco = json.load(f)
+
+# Get existing image filenames
+existing_images = set(os.listdir(images_folder))
+
+filtered_images = []
+old_to_new_ids = {}
+new_id_counter = 0
+
+# ---- REASSIGN IMAGE IDs ----
+for img in coco["images"]:
+    if img["file_name"] in existing_images:
+        old_id = img["id"]
+        new_id = new_id_counter
+        new_id_counter += 1
+
+        old_to_new_ids[old_id] = new_id
+
+        # update image record
+        new_img = img.copy()
+        new_img["id"] = new_id
+        filtered_images.append(new_img)
+
+# ---- FIX ANNOTATIONS ----
+filtered_annotations = []
+for ann in coco["annotations"]:
+    old_img_id = ann["image_id"]
+
+    if old_img_id in old_to_new_ids:
+        new_ann = ann.copy()
+        new_ann["image_id"] = old_to_new_ids[old_img_id]
+        filtered_annotations.append(new_ann)
+
+# ---- Final COCO ----
+filtered_coco = {
+    "images": filtered_images,
+    "annotations": filtered_annotations,
+    "categories": coco.get("categories", []),
+    "licenses": coco.get("licenses", [])
+}
+
+with open(output_json_path, "w") as f:
+    json.dump(filtered_coco, f, indent=4)
+
+print("Done!")
+print(f"New images: {len(filtered_images)}")
+print(f"New annotations: {len(filtered_annotations)}")
