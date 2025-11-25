@@ -2,45 +2,45 @@ import json
 import os
 
 original_json_path = "path/to/original_coco.json"
-images_folder = "path/to/filtered_images_folder"
+images_folder = "path/to/new_images"
 output_json_path = "path/to/filtered_with_new_ids.json"
 
-# Load original COCO
 with open(original_json_path, "r") as f:
     coco = json.load(f)
 
-# Get existing image filenames
-existing_images = set(os.listdir(images_folder))
+# Lowercase for safe matching
+existing_images = {f.lower() for f in os.listdir(images_folder)}
 
 filtered_images = []
 old_to_new_ids = {}
 new_id_counter = 0
 
-# ---- REASSIGN IMAGE IDs ----
+# Filter + rename
 for img in coco["images"]:
-    if img["file_name"] in existing_images:
+    coco_name = os.path.basename(img["file_name"]).lower()
+
+    if coco_name in existing_images:
         old_id = img["id"]
         new_id = new_id_counter
         new_id_counter += 1
 
         old_to_new_ids[old_id] = new_id
 
-        # update image record
         new_img = img.copy()
         new_img["id"] = new_id
+        new_img["file_name"] = coco_name  # Update file_name as well
         filtered_images.append(new_img)
 
-# ---- FIX ANNOTATIONS ----
+# Fix annotations
 filtered_annotations = []
 for ann in coco["annotations"]:
     old_img_id = ann["image_id"]
-
     if old_img_id in old_to_new_ids:
         new_ann = ann.copy()
         new_ann["image_id"] = old_to_new_ids[old_img_id]
         filtered_annotations.append(new_ann)
 
-# ---- Final COCO ----
+# Save final JSON
 filtered_coco = {
     "images": filtered_images,
     "annotations": filtered_annotations,
@@ -52,5 +52,5 @@ with open(output_json_path, "w") as f:
     json.dump(filtered_coco, f, indent=4)
 
 print("Done!")
-print(f"New images: {len(filtered_images)}")
-print(f"New annotations: {len(filtered_annotations)}")
+print("Images kept:", len(filtered_images))
+print("Annotations kept:", len(filtered_annotations))
