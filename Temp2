@@ -1,54 +1,30 @@
 import json
-import os
-from collections import Counter
 
-original_json_path = "path/to/original_coco.json"
-output_json_path = "path/to/coco_without_conflicts.json"
+input_file = "annotations.json"
+output_file = "annotations_modified.json"
 
-# Load COCO
-with open(original_json_path, "r") as f:
+# Load coco json
+with open(input_file, "r") as f:
     coco = json.load(f)
 
-# Extract filenames (normalized)
-filenames = [os.path.basename(img["file_name"]).lower() for img in coco["images"]]
+# 1. Remove all existing categories
+coco["categories"] = []
 
-# Count duplicates
-counts = Counter(filenames)
-
-# All filenames that appear more than once
-conflicted_files = {name for name, c in counts.items() if c > 1}
-
-print("Conflicted filenames:", len(conflicted_files))
-
-# Filter images: keep only those with unique filenames
-clean_images = []
-valid_image_ids = set()
-
-for img in coco["images"]:
-    fname = os.path.basename(img["file_name"]).lower()
-    if fname not in conflicted_files:
-        clean_images.append(img)
-        valid_image_ids.add(img["id"])
-
-print("Images kept:", len(clean_images))
-
-# Filter annotations belonging to valid images only
-clean_annotations = [
-    ann for ann in coco["annotations"] 
-    if ann["image_id"] in valid_image_ids
+# 2. Add the two new categories
+coco["categories"] = [
+    {"id": 1, "name": "Enabled", "supercategory": "UI"},
+    {"id": 2, "name": "Disabled", "supercategory": "UI"}
 ]
 
-print("Annotations kept:", len(clean_annotations))
+# 3. Also update annotations’ category_ids (optional)
+# If you don’t update them, the annotations will have invalid category_ids.
+# Set everything to -1 for now so you can manually re-label later.
 
-# Save clean COCO
-clean_coco = {
-    "images": clean_images,
-    "annotations": clean_annotations,
-    "categories": coco.get("categories", []),
-    "licenses": coco.get("licenses", [])
-}
+for ann in coco["annotations"]:
+    ann["category_id"] = -1     # or 1/2 if you already know the state
 
-with open(output_json_path, "w") as f:
-    json.dump(clean_coco, f, indent=4)
+# Save file
+with open(output_file, "w") as f:
+    json.dump(coco, f, indent=2)
 
-print("Done cleaning conflicts!")
+print("Done! Categories replaced.")
