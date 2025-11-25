@@ -1,56 +1,54 @@
 import json
 import os
+from collections import Counter
 
 original_json_path = "path/to/original_coco.json"
-images_folder = "path/to/new_images"
-output_json_path = "path/to/filtered_with_new_ids.json"
+output_json_path = "path/to/coco_without_conflicts.json"
 
+# Load COCO
 with open(original_json_path, "r") as f:
     coco = json.load(f)
 
-# Lowercase for safe matching
-existing_images = {f.lower() for f in os.listdir(images_folder)}
+# Extract filenames (normalized)
+filenames = [os.path.basename(img["file_name"]).lower() for img in coco["images"]]
 
-filtered_images = []
-old_to_new_ids = {}
-new_id_counter = 0
+# Count duplicates
+counts = Counter(filenames)
 
-# Filter + rename
+# All filenames that appear more than once
+conflicted_files = {name for name, c in counts.items() if c > 1}
+
+print("Conflicted filenames:", len(conflicted_files))
+
+# Filter images: keep only those with unique filenames
+clean_images = []
+valid_image_ids = set()
+
 for img in coco["images"]:
-    coco_name = os.path.basename(img["file_name"]).lower()
+    fname = os.path.basename(img["file_name"]).lower()
+    if fname not in conflicted_files:
+        clean_images.append(img)
+        valid_image_ids.add(img["id"])
 
-    if coco_name in existing_images:
-        old_id = img["id"]
-        new_id = new_id_counter
-        new_id_counter += 1
+print("Images kept:", len(clean_images))
 
-        old_to_new_ids[old_id] = new_id
+# Filter annotations belonging to valid images only
+clean_annotations = [
+    ann for ann in coco["annotations"] 
+    if ann["image_id"] in valid_image_ids
+]
 
-        new_img = img.copy()
-        new_img["id"] = new_id
-        new_img["file_name"] = coco_name  # Update file_name as well
-        filtered_images.append(new_img)
+print("Annotations kept:", len(clean_annotations))
 
-# Fix annotations
-filtered_annotations = []
-for ann in coco["annotations"]:
-    old_img_id = ann["image_id"]
-    if old_img_id in old_to_new_ids:
-        new_ann = ann.copy()
-        new_ann["image_id"] = old_to_new_ids[old_img_id]
-        filtered_annotations.append(new_ann)
-
-# Save final JSON
-filtered_coco = {
-    "images": filtered_images,
-    "annotations": filtered_annotations,
+# Save clean COCO
+clean_coco = {
+    "images": clean_images,
+    "annotations": clean_annotations,
     "categories": coco.get("categories", []),
     "licenses": coco.get("licenses", [])
 }
 
 with open(output_json_path, "w") as f:
-    json.dump(filtered_coco, f, indent=4)
+    json.dump(clean_coco, f, indent=4)
 
-print("Done!")
-print("Images kept:", len(filtered_images))
-print("Annotations kept:", len(filtered_annotations))
+print("Done cleaning conflicts!")
