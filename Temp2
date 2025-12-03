@@ -1,30 +1,56 @@
+import os
 import json
+import csv
 
-input_file = "annotations.json"
-output_file = "annotations_modified.json"
+# Path to your RICO dataset folder
+RICO_FOLDER = "/path/to/rico_dataset/"   # change this
+OUTPUT_CSV = "edit_text_bounds_with_screen_size.csv"
 
-# Load coco json
-with open(input_file, "r") as f:
-    coco = json.load(f)
+def extract_edit_texts(node, results, image_name, screen_w, screen_h):
+    """Recursively extracts EditText elements."""
+    if node.get("class") == "android.widget.EditText":
+        bounds = node.get("bounds", [])
+        if len(bounds) == 4:
+            x1, y1, x2, y2 = bounds
+            results.append([image_name, x1, y1, x2, y2, screen_w, screen_h])
 
-# 1. Remove all existing categories
-coco["categories"] = []
+    # Recursively check children
+    for child in node.get("children", []):
+        extract_edit_texts(child, results, image_name, screen_w, screen_h)
 
-# 2. Add the two new categories
-coco["categories"] = [
-    {"id": 1, "name": "Enabled", "supercategory": "UI"},
-    {"id": 2, "name": "Disabled", "supercategory": "UI"}
-]
 
-# 3. Also update annotations’ category_ids (optional)
-# If you don’t update them, the annotations will have invalid category_ids.
-# Set everything to -1 for now so you can manually re-label later.
+def process_rico_folder():
+    results = []
 
-for ann in coco["annotations"]:
-    ann["category_id"] = -1     # or 1/2 if you already know the state
+    for filename in os.listdir(RICO_FOLDER):
+        if filename.endswith(".json"):
+            json_path = os.path.join(RICO_FOLDER, filename)
+            image_name = filename.replace(".json", ".png")
 
-# Save file
-with open(output_file, "w") as f:
-    json.dump(coco, f, indent=2)
+            try:
+                with open(json_path, "r") as f:
+                    data = json.load(f)
+            except:
+                continue
 
-print("Done! Categories replaced.")
+            # Screen size from root bounds
+            root_bounds = data.get("bounds", [])
+            if len(root_bounds) == 4:
+                _, _, screen_w, screen_h = root_bounds
+            else:
+                screen_w = screen_h = None
+
+            # Extract EditText elements
+            extract_edit_texts(data, results, image_name, screen_w, screen_h)
+
+    # Write to CSV
+    with open(OUTPUT_CSV, "w", newline="") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(["image_name", "x1", "y1", "x2", "y2", "screen_width", "screen_height"])
+        writer.writerows(results)
+
+    print(f"CSV created: {OUTPUT_CSV} with {len(results)} rows")
+
+
+if __name__ == "__main__":
+    process_rico_folder()
