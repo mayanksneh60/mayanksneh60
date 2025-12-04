@@ -1,56 +1,34 @@
-import os
-import json
 import csv
+import os
+import shutil
 
-# Path to your RICO dataset folder
-RICO_FOLDER = "/path/to/rico_dataset/"   # change this
-OUTPUT_CSV = "edit_text_bounds_with_screen_size.csv"
+# ---- CONFIG ----
+csv_path = "path/to/your.csv"
+source_folder = "path/to/source_images"
+destination_folder = "path/to/destination_images"
 
-def extract_edit_texts(node, results, image_name, screen_w, screen_h):
-    """Recursively extracts EditText elements."""
-    if node.get("class") == "android.widget.EditText":
-        bounds = node.get("bounds", [])
-        if len(bounds) == 4:
-            x1, y1, x2, y2 = bounds
-            results.append([image_name, x1, y1, x2, y2, screen_w, screen_h])
+# Create destination folder if not exists
+os.makedirs(destination_folder, exist_ok=True)
 
-    # Recursively check children
-    for child in node.get("children", []):
-        extract_edit_texts(child, results, image_name, screen_w, screen_h)
+unique_images = set()
 
+# ---- READ CSV ----
+with open(csv_path, newline='', encoding='utf-8') as file:
+    reader = csv.DictReader(file)
+    for row in reader:
+        img_name = row["image_name"].strip()
+        unique_images.add(img_name)
 
-def process_rico_folder():
-    results = []
+print(f"Total unique images to copy: {len(unique_images)}")
 
-    for filename in os.listdir(RICO_FOLDER):
-        if filename.endswith(".json"):
-            json_path = os.path.join(RICO_FOLDER, filename)
-            image_name = filename.replace(".json", ".png")
+# ---- COPY FILES ----
+for img in unique_images:
+    src = os.path.join(source_folder, img)
+    dst = os.path.join(destination_folder, img)
 
-            try:
-                with open(json_path, "r") as f:
-                    data = json.load(f)
-            except:
-                continue
+    if os.path.exists(src):
+        shutil.copy(src, dst)
+    else:
+        print(f"Missing image (skipped): {img}")
 
-            # Screen size from root bounds
-            root_bounds = data.get("bounds", [])
-            if len(root_bounds) == 4:
-                _, _, screen_w, screen_h = root_bounds
-            else:
-                screen_w = screen_h = None
-
-            # Extract EditText elements
-            extract_edit_texts(data, results, image_name, screen_w, screen_h)
-
-    # Write to CSV
-    with open(OUTPUT_CSV, "w", newline="") as csv_file:
-        writer = csv.writer(csv_file)
-        writer.writerow(["image_name", "x1", "y1", "x2", "y2", "screen_width", "screen_height"])
-        writer.writerows(results)
-
-    print(f"CSV created: {OUTPUT_CSV} with {len(results)} rows")
-
-
-if __name__ == "__main__":
-    process_rico_folder()
+print("Copying complete.")
