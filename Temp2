@@ -1,34 +1,73 @@
-import csv
-import os
-import shutil
+import csv, os, shutil, random
+from collections import defaultdict
 
-# ---- CONFIG ----
-csv_path = "path/to/your.csv"
-source_folder = "path/to/source_images"
-destination_folder = "path/to/destination_images"
+CSV_PATH = "dataset.csv"
+IMG_DIR = "images"
+OUT_DIR = "yolo_dataset"
 
-# Create destination folder if not exists
-os.makedirs(destination_folder, exist_ok=True)
+TRAIN_RATIO = 0.8
 
-unique_images = set()
+# Create folders
+train_img_dir = os.path.join(OUT_DIR, "images/train")
+val_img_dir = os.path.join(OUT_DIR, "images/val")
+train_lbl_dir = os.path.join(OUT_DIR, "labels/train")
+val_lbl_dir = os.path.join(OUT_DIR, "labels/val")
 
-# ---- READ CSV ----
-with open(csv_path, newline='', encoding='utf-8') as file:
-    reader = csv.DictReader(file)
+for d in [train_img_dir, val_img_dir, train_lbl_dir, val_lbl_dir]:
+    os.makedirs(d, exist_ok=True)
+
+# ------------------------ LOAD CSV -------------------------
+records = defaultdict(list)
+
+with open(CSV_PATH, "r") as f:
+    reader = csv.reader(f)
+    header = next(reader)
+
     for row in reader:
-        img_name = row["image_name"].strip()
-        unique_images.add(img_name)
+        image_name, x1, y1, x2, y2, sw, sh = row
+        x1, y1, x2, y2, sw, sh = map(float, [x1, y1, x2, y2, sw, sh])
 
-print(f"Total unique images to copy: {len(unique_images)}")
+        records[image_name].append((x1, y1, x2, y2, sw, sh))
 
-# ---- COPY FILES ----
-for img in unique_images:
-    src = os.path.join(source_folder, img)
-    dst = os.path.join(destination_folder, img)
+# --------------------- TRAIN/VAL SPLIT ---------------------
+image_list = list(records.keys())
+random.shuffle(image_list)
 
-    if os.path.exists(src):
-        shutil.copy(src, dst)
-    else:
-        print(f"Missing image (skipped): {img}")
+split_idx = int(len(image_list) * TRAIN_RATIO)
+train_images = image_list[:split_idx]
+val_images = image_list[split_idx:]
 
-print("Copying complete.")
+
+# ------------------ CONVERT AND SAVE -----------------------
+def convert_and_save(image_name, bbox_list, img_dst, lbl_dst):
+    lbl_path = os.path.join(lbl_dst, image_name.replace(".jpg", ".txt").replace(".png",".txt"))
+
+    with open(lbl_path, "w") as lf:
+        for (x1, y1, x2, y2, sw, sh) in bbox_list:
+
+            w = x2 - x1
+            h = y2 - y1
+            xc = x1 + w / 2
+            yc = y1 + h / 2
+
+            # normalize
+            xc /= sw
+            yc /= sh
+            w /= sw
+            h /= sh
+
+            lf.write(f"0 {xc} {yc} {w} {h}\n")
+
+    # copy image
+    shutil.copy(os.path.join(IMG_DIR, image_name), os.path.join(img_dst, image_name))
+
+
+# SAVE TRAIN SET
+for img in train_images:
+    convert_and_save(img, records[img], train_img_dir, train_lbl_dir)
+
+# SAVE VAL SET
+for img in val_images:
+    convert_and_save(img, records[img], val_images_dir := val_img_dir, val_lbl_dir)
+
+print("Dataset prepared successfully!")
