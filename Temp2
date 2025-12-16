@@ -1,6 +1,135 @@
-pairs = []
-for k, v in hyp.items():
-    pairs.append(str(k) + "=" + str(v))
+import cv2
+import torch
+import numpy as np
+from PIL import Image
 
-msg = ", ".join(pairs)
-Logger.info(colorstr("hyperparameters: ") + msg)
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD  = [0.229, 0.224, 0.225]
+
+def preprocess_internvl(image_path, target_size=448):
+    img = cv2.imread(image_path)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    h, w = img.shape[:2]
+
+    # ---- resize with aspect ratio ----
+    scale = min(target_size / w, target_size / h)
+    new_w, new_h = int(w * scale), int(h * scale)
+
+    resized = cv2.resize(img, (new_w, new_h))
+
+    # ---- padding ----
+    pad_w = target_size - new_w
+    pad_h = target_size - new_h
+
+    pad_left = pad_w // 2
+    pad_top = pad_h // 2
+
+    padded = np.full((target_size, target_size, 3), 114, dtype=np.uint8)
+    padded[pad_top:pad_top+new_h, pad_left:pad_left+new_w] = resized
+
+    # ---- to tensor ----
+    image = Image.fromarray(padded)
+    image = np.array(image).astype(np.float32) / 255.0
+
+    image = (image - IMAGENET_MEAN) / IMAGENET_STD
+    image = torch.from_numpy(image).permute(2, 0, 1).unsqueeze(0)
+
+    meta = {
+        "scale": scale,
+        "pad_left": pad_left,
+        "pad_top": pad_top,
+        "orig_w": w,
+        "orig_h": h
+    }
+
+    return image, meta
+
+
+question = """
+Detect all editable text input fields in the image.
+
+Return ONLY a valid JSON array in the following format:
+[
+  {"x1": int, "y1": int, "x2": int, "y2": int}
+]
+
+Rules:
+- Coordinates must be in pixel space of the GIVEN IMAGE
+- No explanations
+- No extra text
+"""
+
+
+pixel_values, meta = preprocess_internvl("input.png")
+
+pixel_values = pixel_values.cuda().half()   # InternVL prefers fp16
+
+generation_config = {
+    "max_new_tokens": 512,
+    "do_sample": False,
+    "temperature": 0
+}
+
+response = model.chat(
+    tokenizer=tokenizer,
+    pixel_values=pixel_values,
+    question=question,
+    generation_config=generation_config
+)
+
+print(response)
+
+
+
+
+import json
+import re
+
+def parse_boxes(text):
+    text = re.search(r'\[.*\]', text, re.S).group()
+    data = json.loads(text)
+    return [[d["x1"], d["y1"], d["x2"], d["y2"]] for d in data]
+
+
+def recover_original_coords(boxes, meta):
+    scale = meta["scale"]
+    pad_left = meta["pad_left"]
+    pad_top = meta["pad_top"]
+    ow, oh = meta["orig_w"], meta["orig_h"]
+
+    recovered = []
+
+    for x1, y1, x2, y2 in boxes:
+        # remove padding
+        x1 -= pad_left
+        x2 -= pad_left
+        y1 -= pad_top
+        y2 -= pad_top
+
+        # rescale
+        x1 /= scale
+        x2 /= scale
+        y1 /= scale
+        y2 /= scale
+
+        # clamp
+        x1 = max(0, min(ow, x1))
+        x2 = max(0, min(ow, x2))
+        y1 = max(0, min(oh, y1))
+        y2 = max(0, min(oh, y2))
+
+        recovered.append([int(x1), int(y1), int(x2), int(y2)])
+
+    return recovered
+
+
+
+
+model_boxes = parse_boxes(response)
+final_boxes = recover_original_coords(model_boxes, meta)
+print(final_boxes)
+
+
+
+
