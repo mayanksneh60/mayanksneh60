@@ -1,20 +1,24 @@
-from PIL import ImageDraw
+You are given an image of size exactly 448 x 448 pixels.
 
-img = Image.open("internvl_input_debug.png")
-draw = ImageDraw.Draw(img)
+Task:
+Identify all editable text input fields (EditText, text boxes where users can type).
 
-for x1, y1, x2, y2 in boxes_448:
-    draw.rectangle([x1, y1, x2, y2], outline="red", width=2)
+Output format:
+Return ONLY a valid JSON array.
+Each element must be an object with integer pixel coordinates:
+[
+  {"x1": int, "y1": int, "x2": int, "y2": int}
+]
 
-img.save("internvl_input_with_boxes.png")
+Strict rules:
+- (0,0) is the top-left corner of the image.
+- x values must be between 0 and 447 inclusive.
+- y values must be between 0 and 447 inclusive.
+- x2 must be greater than x1.
+- y2 must be greater than y1.
+- Coordinates MUST be in absolute pixel values, NOT normalized.
+- Do NOT return percentages or decimals.
+- Do NOT return coordinates outside the image.
+- Do NOT include any explanation or extra text.
 
-
-
-
-orig = Image.open("original.png")
-draw = ImageDraw.Draw(orig)
-
-for x1, y1, x2, y2 in final_boxes:
-    draw.rectangle([x1, y1, x2, y2], outline="green", width=2)
-
-orig.save("original_with_boxes.png")
+If no editable text input fields are present, return an empty JSON array: [].
