@@ -1,24 +1,83 @@
-You are given an image of size exactly 448 x 448 pixels.
+import torch
+import cv2
+import numpy as np
+from PIL import Image
+from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 
-Task:
-Identify all editable text input fields (EditText, text boxes where users can type).
+# ---------------- CONFIG ----------------
+MODEL_ID = "openmmlab-community/mm_grounding_dino_large_all"
+IMAGE_PATH = "screenshot.png"   # your UI screenshot
+PROMPT = (
+    "edit text input field. text box. input area. "
+    "search box. username field. password field."
+)
 
-Output format:
-Return ONLY a valid JSON array.
-Each element must be an object with integer pixel coordinates:
-[
-  {"x1": int, "y1": int, "x2": int, "y2": int}
-]
+BOX_THRESHOLD = 0.35
+TEXT_THRESHOLD = 0.25
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# ----------------------------------------
 
-Strict rules:
-- (0,0) is the top-left corner of the image.
-- x values must be between 0 and 447 inclusive.
-- y values must be between 0 and 447 inclusive.
-- x2 must be greater than x1.
-- y2 must be greater than y1.
-- Coordinates MUST be in absolute pixel values, NOT normalized.
-- Do NOT return percentages or decimals.
-- Do NOT return coordinates outside the image.
-- Do NOT include any explanation or extra text.
+# Load model & processor
+processor = AutoProcessor.from_pretrained(MODEL_ID)
+model = AutoModelForZeroShotObjectDetection.from_pretrained(MODEL_ID)
+model.to(DEVICE)
+model.eval()
 
-If no editable text input fields are present, return an empty JSON array: [].
+# Load image
+image = Image.open(IMAGE_PATH).convert("RGB")
+width, height = image.size
+
+# Preprocess
+inputs = processor(
+    images=image,
+    text=PROMPT,
+    return_tensors="pt"
+).to(DEVICE)
+
+# Inference
+with torch.no_grad():
+    outputs = model(**inputs)
+
+# Post-process (convert to pixel coordinates)
+results = processor.post_process_grounded_object_detection(
+    outputs,
+    box_threshold=BOX_THRESHOLD,
+    text_threshold=TEXT_THRESHOLD,
+    target_sizes=[(height, width)]
+)[0]
+
+boxes = results["boxes"]      # (N, 4) -> x1,y1,x2,y2
+scores = results["scores"]
+labels = results["labels"]
+
+# Print results
+print("\nDetected EditText Boxes:")
+detections = []
+for box, score, label in zip(boxes, scores, labels):
+    x1, y1, x2, y2 = map(int, box.tolist())
+    detections.append({
+        "label": label,
+        "confidence": float(score),
+        "bbox": [x1, y1, x2, y2]
+    })
+    print(f"{label}: {x1,y1,x2,y2}  score={score:.3f}")
+
+# ---------------- OPTIONAL VISUALIZATION ----------------
+img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+for det in detections:
+    x1, y1, x2, y2 = det["bbox"]
+    cv2.rectangle(img_cv, (x1, y1), (x2, y2), (0, 255, 0), 2)
+    cv2.putText(
+        img_cv,
+        det["label"],
+        (x1, max(y1 - 5, 10)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (0, 255, 0),
+        1
+    )
+
+cv2.imshow("EditText Detection", img_cv)
+cv2.waitKey(0)
+cv2.destroyAllWindows()
