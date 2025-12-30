@@ -4,9 +4,8 @@ import numpy as np
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 
-# ---------------- CONFIG ----------------
 MODEL_ID = "openmmlab-community/mm_grounding_dino_large_all"
-IMAGE_PATH = "screenshot.png"   # your UI screenshot
+IMAGE_PATH = "screenshot.png"
 PROMPT = (
     "edit text input field. text box. input area. "
     "search box. username field. password field."
@@ -15,69 +14,72 @@ PROMPT = (
 BOX_THRESHOLD = 0.35
 TEXT_THRESHOLD = 0.25
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-# ----------------------------------------
 
-# Load model & processor
+# Load
 processor = AutoProcessor.from_pretrained(MODEL_ID)
-model = AutoModelForZeroShotObjectDetection.from_pretrained(MODEL_ID)
-model.to(DEVICE)
+model = AutoModelForZeroShotObjectDetection.from_pretrained(MODEL_ID).to(DEVICE)
 model.eval()
 
-# Load image
 image = Image.open(IMAGE_PATH).convert("RGB")
-width, height = image.size
+W, H = image.size
 
-# Preprocess
-inputs = processor(
-    images=image,
-    text=PROMPT,
-    return_tensors="pt"
-).to(DEVICE)
+inputs = processor(images=image, text=PROMPT, return_tensors="pt").to(DEVICE)
 
-# Inference
 with torch.no_grad():
     outputs = model(**inputs)
 
-# Post-process (convert to pixel coordinates)
-results = processor.post_process_grounded_object_detection(
-    outputs,
-    box_threshold=BOX_THRESHOLD,
-    text_threshold=TEXT_THRESHOLD,
-    target_sizes=[(height, width)]
-)[0]
+# ---------------------------------------------------
+# MANUAL POST-PROCESSING (THE FIX)
+# ---------------------------------------------------
 
-boxes = results["boxes"]      # (N, 4) -> x1,y1,x2,y2
-scores = results["scores"]
-labels = results["labels"]
+logits = outputs.logits.sigmoid()[0]      # (num_queries, vocab)
+boxes  = outputs.pred_boxes[0]            # (num_queries, 4) in cx,cy,w,h
 
-# Print results
-print("\nDetected EditText Boxes:")
+# Get max score per query
+scores, _ = logits.max(dim=1)
+
+keep = scores > BOX_THRESHOLD
+boxes = boxes[keep]
+scores = scores[keep]
+
+# Convert cx,cy,w,h → x1,y1,x2,y2
+cx, cy, w, h = boxes.unbind(1)
+
+x1 = (cx - 0.5 * w) * W
+y1 = (cy - 0.5 * h) * H
+x2 = (cx + 0.5 * w) * W
+y2 = (cy + 0.5 * h) * H
+
+boxes_xyxy = torch.stack([x1, y1, x2, y2], dim=1)
+
+# Clamp
+boxes_xyxy[:, 0::2].clamp_(0, W)
+boxes_xyxy[:, 1::2].clamp_(0, H)
+
+# ---------------------------------------------------
+# RESULTS
+# ---------------------------------------------------
+
 detections = []
-for box, score, label in zip(boxes, scores, labels):
-    x1, y1, x2, y2 = map(int, box.tolist())
+for box, score in zip(boxes_xyxy, scores):
     detections.append({
-        "label": label,
-        "confidence": float(score),
-        "bbox": [x1, y1, x2, y2]
+        "bbox": [int(v) for v in box.tolist()],
+        "confidence": float(score)
     })
-    print(f"{label}: {x1,y1,x2,y2}  score={score:.3f}")
 
-# ---------------- OPTIONAL VISUALIZATION ----------------
-img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+print("Detected EditText boxes:")
+for d in detections:
+    print(d)
 
-for det in detections:
-    x1, y1, x2, y2 = det["bbox"]
-    cv2.rectangle(img_cv, (x1, y1), (x2, y2), (0, 255, 0), 2)
-    cv2.putText(
-        img_cv,
-        det["label"],
-        (x1, max(y1 - 5, 10)),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
-        (0, 255, 0),
-        1
-    )
+# ---------------------------------------------------
+# OPTIONAL VISUALIZATION
+# ---------------------------------------------------
 
-cv2.imshow("EditText Detection", img_cv)
+img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+for d in detections:
+    x1, y1, x2, y2 = d["bbox"]
+    cv2.rectangle(img, (x1, y1), (x2, y2), (0,255,0), 2)
+
+cv2.imshow("EditText Detection", img)
 cv2.waitKey(0)
 cv2.destroyAllWindows()
