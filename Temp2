@@ -20,8 +20,13 @@ model.eval()
 image_url = "http://images.cocodataset.org/val2017/000000039769.jpg"
 image = load_image(image_url)   # PIL image
 
-text_labels = [["a cat", "a remote control"]]
-
+text_labels = [[
+    "text input field",
+    "edit text box",
+    "input area",
+    "search box",
+    "textbox"
+]]
 inputs = processor(
     images=image,
     text=text_labels,
