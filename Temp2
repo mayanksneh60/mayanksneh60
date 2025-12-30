@@ -1,85 +1,89 @@
 import torch
 import cv2
 import numpy as np
-from PIL import Image
-from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
+from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+from transformers.image_utils import load_image
 
-MODEL_ID = "openmmlab-community/mm_grounding_dino_large_all"
-IMAGE_PATH = "screenshot.png"
-PROMPT = (
-    "edit text input field. text box. input area. "
-    "search box. username field. password field."
-)
+# -------------------------------
+# Prepare processor and model
+# -------------------------------
+model_id = "rziga/mm_grounding_dino_large_all"
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
-BOX_THRESHOLD = 0.35
-TEXT_THRESHOLD = 0.25
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-# Load
-processor = AutoProcessor.from_pretrained(MODEL_ID)
-model = AutoModelForZeroShotObjectDetection.from_pretrained(MODEL_ID).to(DEVICE)
+processor = AutoProcessor.from_pretrained(model_id)
+model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(device)
 model.eval()
 
-image = Image.open(IMAGE_PATH).convert("RGB")
-W, H = image.size
+# -------------------------------
+# Prepare inputs
+# -------------------------------
+image_url = "http://images.cocodataset.org/val2017/000000039769.jpg"
+image = load_image(image_url)   # PIL image
 
-inputs = processor(images=image, text=PROMPT, return_tensors="pt").to(DEVICE)
+text_labels = [["a cat", "a remote control"]]
 
+inputs = processor(
+    images=image,
+    text=text_labels,
+    return_tensors="pt"
+).to(device)
+
+# -------------------------------
+# Run inference
+# -------------------------------
 with torch.no_grad():
     outputs = model(**inputs)
 
-# ---------------------------------------------------
-# MANUAL POST-PROCESSING (THE FIX)
-# ---------------------------------------------------
+# -------------------------------
+# Postprocess outputs
+# -------------------------------
+results = processor.post_process_grounded_object_detection(
+    outputs,
+    threshold=0.4,
+    target_sizes=[(image.height, image.width)]
+)
 
-logits = outputs.logits.sigmoid()[0]      # (num_queries, vocab)
-boxes  = outputs.pred_boxes[0]            # (num_queries, 4) in cx,cy,w,h
+result = results[0]
 
-# Get max score per query
-scores, _ = logits.max(dim=1)
+# -------------------------------
+# Print detections
+# -------------------------------
+for box, score, labels in zip(result["boxes"], result["scores"], result["labels"]):
+    box = [round(x, 2) for x in box.tolist()]
+    print(f"Detected {labels} with confidence {round(score.item(), 3)} at location {box}")
 
-keep = scores > BOX_THRESHOLD
-boxes = boxes[keep]
-scores = scores[keep]
+# =====================================================
+# 🔍 VISUALIZATION LOGIC (APPENDED)
+# =====================================================
 
-# Convert cx,cy,w,h → x1,y1,x2,y2
-cx, cy, w, h = boxes.unbind(1)
+# Convert PIL image → OpenCV (BGR)
+img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
-x1 = (cx - 0.5 * w) * W
-y1 = (cy - 0.5 * h) * H
-x2 = (cx + 0.5 * w) * W
-y2 = (cy + 0.5 * h) * H
+for box, score, label in zip(result["boxes"], result["scores"], result["labels"]):
+    x1, y1, x2, y2 = map(int, box.tolist())
 
-boxes_xyxy = torch.stack([x1, y1, x2, y2], dim=1)
+    # Draw bounding box
+    cv2.rectangle(
+        img_cv,
+        (x1, y1),
+        (x2, y2),
+        color=(0, 255, 0),
+        thickness=2
+    )
 
-# Clamp
-boxes_xyxy[:, 0::2].clamp_(0, W)
-boxes_xyxy[:, 1::2].clamp_(0, H)
+    # Draw label + score
+    text = f"{label} ({score:.2f})"
+    cv2.putText(
+        img_cv,
+        text,
+        (x1, max(y1 - 8, 15)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (0, 255, 0),
+        2
+    )
 
-# ---------------------------------------------------
-# RESULTS
-# ---------------------------------------------------
-
-detections = []
-for box, score in zip(boxes_xyxy, scores):
-    detections.append({
-        "bbox": [int(v) for v in box.tolist()],
-        "confidence": float(score)
-    })
-
-print("Detected EditText boxes:")
-for d in detections:
-    print(d)
-
-# ---------------------------------------------------
-# OPTIONAL VISUALIZATION
-# ---------------------------------------------------
-
-img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-for d in detections:
-    x1, y1, x2, y2 = d["bbox"]
-    cv2.rectangle(img, (x1, y1), (x2, y2), (0,255,0), 2)
-
-cv2.imshow("EditText Detection", img)
+# Show image
+cv2.imshow("Grounding DINO Detection", img_cv)
 cv2.waitKey(0)
 cv2.destroyAllWindows()
