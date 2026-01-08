@@ -1,94 +1,28 @@
-import torch
-import cv2
-import numpy as np
-from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
-from transformers.image_utils import load_image
+import pandas as pd
 
-# -------------------------------
-# Prepare processor and model
-# -------------------------------
-model_id = "rziga/mm_grounding_dino_large_all"
-device = "cuda" if torch.cuda.is_available() else "cpu"
+# Load CSVs
+csv1 = pd.read_csv("csv1.csv")
+csv2 = pd.read_csv("csv2.csv")
 
-processor = AutoProcessor.from_pretrained(model_id)
-model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(device)
-model.eval()
+# Keep only required columns from csv1
+lookup = csv1[["image_name", "screen_width", "screen_height"]]
 
-# -------------------------------
-# Prepare inputs
-# -------------------------------
-image_url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-image = load_image(image_url)   # PIL image
-
-text_labels = [[
-    "text input field",
-    "edit text box",
-    "input area",
-    "search box",
-    "textbox"
-]]
-inputs = processor(
-    images=image,
-    text=text_labels,
-    return_tensors="pt"
-).to(device)
-
-# -------------------------------
-# Run inference
-# -------------------------------
-with torch.no_grad():
-    outputs = model(**inputs)
-
-# -------------------------------
-# Postprocess outputs
-# -------------------------------
-results = processor.post_process_grounded_object_detection(
-    outputs,
-    threshold=0.4,
-    target_sizes=[(image.height, image.width)]
+# Merge on image_name
+merged = csv2.merge(
+    lookup,
+    on="image_name",
+    how="left",
+    suffixes=("", "_from_csv1")
 )
 
-result = results[0]
+# Populate missing values
+merged["screen_width"] = merged["screen_width"].fillna(merged["screen_width_from_csv1"])
+merged["screen_height"] = merged["screen_height"].fillna(merged["screen_height_from_csv1"])
 
-# -------------------------------
-# Print detections
-# -------------------------------
-for box, score, labels in zip(result["boxes"], result["scores"], result["labels"]):
-    box = [round(x, 2) for x in box.tolist()]
-    print(f"Detected {labels} with confidence {round(score.item(), 3)} at location {box}")
+# Drop helper columns
+merged.drop(columns=["screen_width_from_csv1", "screen_height_from_csv1"], inplace=True)
 
-# =====================================================
-# 🔍 VISUALIZATION LOGIC (APPENDED)
-# =====================================================
+# Save output
+merged.to_csv("csv2_updated.csv", index=False)
 
-# Convert PIL image → OpenCV (BGR)
-img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-
-for box, score, label in zip(result["boxes"], result["scores"], result["labels"]):
-    x1, y1, x2, y2 = map(int, box.tolist())
-
-    # Draw bounding box
-    cv2.rectangle(
-        img_cv,
-        (x1, y1),
-        (x2, y2),
-        color=(0, 255, 0),
-        thickness=2
-    )
-
-    # Draw label + score
-    text = f"{label} ({score:.2f})"
-    cv2.putText(
-        img_cv,
-        text,
-        (x1, max(y1 - 8, 15)),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
-        (0, 255, 0),
-        2
-    )
-
-# Show image
-cv2.imshow("Grounding DINO Detection", img_cv)
-cv2.waitKey(0)
-cv2.destroyAllWindows()
+print("✅ csv2_updated.csv created successfully")
