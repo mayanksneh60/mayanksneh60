@@ -42,7 +42,10 @@ class EditTextDataset(Dataset):
     def __init__(self, samples, image_root, processor):
         self.samples = samples
         self.image_root = image_root
-        self.processor = processor
+        self.tokenizer = processor.tokenizer
+
+        # InternVL requirement
+        self.tokenizer.padding_side = "left"
 
     def __len__(self):
         return len(self.samples)
@@ -50,35 +53,56 @@ class EditTextDataset(Dataset):
     def __getitem__(self, idx):
         item = self.samples[idx]
 
-        # Load image
         image = Image.open(f"{self.image_root}/{item['image']}").convert("RGB")
 
-        # Encode image ONLY
-        image_inputs = self.processor.image_processor(
-            image,
-            return_tensors="pt"
-        )
-
-        # Encode text ONLY
-        text_inputs = self.processor.tokenizer(
+        text_inputs = self.tokenizer(
             item["prompt"],
-            return_tensors="pt"
+            return_tensors="pt",
+            padding=False
         )
 
-        # Encode labels
-        labels = self.processor.tokenizer(
+        label_inputs = self.tokenizer(
             item["response"],
-            return_tensors="pt"
+            return_tensors="pt",
+            padding=False
         )
 
         return {
             "input_ids": text_inputs["input_ids"].squeeze(0),
             "attention_mask": text_inputs["attention_mask"].squeeze(0),
-            "pixel_values": image_inputs["pixel_values"].squeeze(0),
-            "labels": labels["input_ids"].squeeze(0),
+            "labels": label_inputs["input_ids"].squeeze(0),
+            "images": image,   # <-- raw PIL image
         }
 
 
+def collate_fn(batch):
+    return {
+        "input_ids": torch.nn.utils.rnn.pad_sequence(
+            [b["input_ids"] for b in batch],
+            batch_first=True,
+            padding_value=0
+        ),
+        "attention_mask": torch.nn.utils.rnn.pad_sequence(
+            [b["attention_mask"] for b in batch],
+            batch_first=True,
+            padding_value=0
+        ),
+        "labels": torch.nn.utils.rnn.pad_sequence(
+            [b["labels"] for b in batch],
+            batch_first=True,
+            padding_value=-100
+        ),
+        "images": [b["images"] for b in batch],  # list of PIL images
+    }
+
+loader = DataLoader(dataset, batch_size=1, collate_fn=collate_fn)
+
+outputs = model(
+    input_ids=batch["input_ids"].cuda(),
+    attention_mask=batch["attention_mask"].cuda(),
+    images=batch["images"],  # list or PIL
+    labels=batch["labels"].cuda()
+)
 
 
 import torch
