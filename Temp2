@@ -4,25 +4,21 @@ import pandas as pd
 csv1 = pd.read_csv("csv1.csv")
 csv2 = pd.read_csv("csv2.csv")
 
-# Keep only required columns from csv1
-lookup = csv1[["image_name", "screen_width", "screen_height"]]
+# Deduplicate csv1: keep first screen size per image_name
+lookup = (
+    csv1[["image_name", "screen_width", "screen_height"]]
+    .drop_duplicates(subset="image_name")
+)
 
-# Merge on image_name
+# Merge (one-to-one)
 merged = csv2.merge(
     lookup,
     on="image_name",
-    how="left",
-    suffixes=("", "_from_csv1")
+    how="left"
 )
 
-# Populate missing values
-merged["screen_width"] = merged["screen_width"].fillna(merged["screen_width_from_csv1"])
-merged["screen_height"] = merged["screen_height"].fillna(merged["screen_height_from_csv1"])
-
-# Drop helper columns
-merged.drop(columns=["screen_width_from_csv1", "screen_height_from_csv1"], inplace=True)
-
-# Save output
+# Save result
 merged.to_csv("csv2_updated.csv", index=False)
 
-print("✅ csv2_updated.csv created successfully")
+print(f"Rows in csv2: {len(csv2)}")
+print(f"Rows after update: {len(merged)}")
