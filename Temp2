@@ -34,8 +34,9 @@ for image_name, boxes in grouped.items():
 
 
 
-from PIL import Image
 from torch.utils.data import Dataset
+from PIL import Image
+import torch
 
 class EditTextDataset(Dataset):
     def __init__(self, samples, image_root, processor):
@@ -48,25 +49,34 @@ class EditTextDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.samples[idx]
+
+        # Load image
         image = Image.open(f"{self.image_root}/{item['image']}").convert("RGB")
 
-        inputs = self.processor(
-            images=image,
-            text=item["prompt"],
+        # Encode image ONLY
+        image_inputs = self.processor.image_processor(
+            image,
             return_tensors="pt"
         )
 
+        # Encode text ONLY
+        text_inputs = self.processor.tokenizer(
+            item["prompt"],
+            return_tensors="pt"
+        )
+
+        # Encode labels
         labels = self.processor.tokenizer(
             item["response"],
             return_tensors="pt"
         )
 
         return {
-            "input_ids": inputs["input_ids"].squeeze(0),
-            "pixel_values": inputs["pixel_values"].squeeze(0),
-            "labels": labels["input_ids"].squeeze(0)
+            "input_ids": text_inputs["input_ids"].squeeze(0),
+            "attention_mask": text_inputs["attention_mask"].squeeze(0),
+            "pixel_values": image_inputs["pixel_values"].squeeze(0),
+            "labels": labels["input_ids"].squeeze(0),
         }
-
 
 
 
@@ -124,10 +134,11 @@ for epoch in range(3):
         optimizer.zero_grad()
 
         outputs = model(
-            input_ids=batch["input_ids"].cuda(),
-            pixel_values=batch["pixel_values"].cuda(),
-            labels=batch["labels"].cuda()
-        )
+    input_ids=batch["input_ids"].cuda(),
+    attention_mask=batch["attention_mask"].cuda(),
+    pixel_values=batch["pixel_values"].cuda(),
+    labels=batch["labels"].cuda()
+)
 
         loss = outputs.loss
         loss.backward()
