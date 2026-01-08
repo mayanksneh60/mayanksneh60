@@ -1,24 +1,162 @@
 import pandas as pd
+import json
+from collections import defaultdict
 
-# Load CSVs
-csv1 = pd.read_csv("csv1.csv")
-csv2 = pd.read_csv("csv2.csv")
+CSV_PATH = "annotations.csv"
 
-# Deduplicate csv1: keep first screen size per image_name
-lookup = (
-    csv1[["image_name", "screen_width", "screen_height"]]
-    .drop_duplicates(subset="image_name")
+df = pd.read_csv(CSV_PATH)
+
+grouped = defaultdict(list)
+
+for _, row in df.iterrows():
+    x1 = row.x1 / row.screen_width
+    y1 = row.y1 / row.screen_height
+    x2 = row.x2 / row.screen_width
+    y2 = row.y2 / row.screen_height
+
+    grouped[row.image_name].append({
+        "x1": round(x1, 4),
+        "y1": round(y1, 4),
+        "x2": round(x2, 4),
+        "y2": round(y2, 4)
+    })
+
+samples = []
+for image_name, boxes in grouped.items():
+    samples.append({
+        "image": image_name,
+        "prompt": (
+            "Identify all editable text input boxes in the image. "
+            "Return bounding boxes as JSON using normalized coordinates."
+        ),
+        "response": json.dumps(boxes)
+    })
+
+
+
+from PIL import Image
+from torch.utils.data import Dataset
+
+class EditTextDataset(Dataset):
+    def __init__(self, samples, image_root, processor):
+        self.samples = samples
+        self.image_root = image_root
+        self.processor = processor
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        item = self.samples[idx]
+        image = Image.open(f"{self.image_root}/{item['image']}").convert("RGB")
+
+        inputs = self.processor(
+            images=image,
+            text=item["prompt"],
+            return_tensors="pt"
+        )
+
+        labels = self.processor.tokenizer(
+            item["response"],
+            return_tensors="pt"
+        )
+
+        return {
+            "input_ids": inputs["input_ids"].squeeze(0),
+            "pixel_values": inputs["pixel_values"].squeeze(0),
+            "labels": labels["input_ids"].squeeze(0)
+        }
+
+
+
+
+
+import torch
+from transformers import AutoModelForCausalLM, AutoProcessor
+from peft import LoraConfig, get_peft_model
+
+MODEL_NAME = "OpenGVLab/InternVL3-78B"
+
+processor = AutoProcessor.from_pretrained(MODEL_NAME)
+
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_NAME,
+    torch_dtype=torch.float16,
+    device_map="auto"
 )
 
-# Merge (one-to-one)
-merged = csv2.merge(
-    lookup,
-    on="image_name",
-    how="left"
+lora_config = LoraConfig(
+    r=16,
+    lora_alpha=32,
+    lora_dropout=0.05,
+    target_modules=["q_proj", "v_proj"],
+    task_type="CAUSAL_LM"
 )
 
-# Save result
-merged.to_csv("csv2_updated.csv", index=False)
+model = get_peft_model(model, lora_config)
+model.print_trainable_parameters()
 
-print(f"Rows in csv2: {len(csv2)}")
-print(f"Rows after update: {len(merged)}")
+
+
+
+
+
+
+from torch.utils.data import DataLoader
+from transformers import AdamW
+from tqdm import tqdm
+
+dataset = EditTextDataset(
+    samples=samples,
+    image_root="images",
+    processor=processor
+)
+
+loader = DataLoader(dataset, batch_size=1, shuffle=True)
+
+optimizer = AdamW(model.parameters(), lr=2e-5)
+
+model.train()
+
+for epoch in range(3):
+    loop = tqdm(loader, desc=f"Epoch {epoch}")
+    for batch in loop:
+        optimizer.zero_grad()
+
+        outputs = model(
+            input_ids=batch["input_ids"].cuda(),
+            pixel_values=batch["pixel_values"].cuda(),
+            labels=batch["labels"].cuda()
+        )
+
+        loss = outputs.loss
+        loss.backward()
+        optimizer.step()
+
+        loop.set_postfix(loss=loss.item())
+
+
+
+
+
+
+model.save_pretrained("internvl_edittext_lora")
+processor.save_pretrained("internvl_edittext_lora")
+
+
+
+
+
+
+image = Image.open("test.png").convert("RGB")
+
+inputs = processor(
+    images=image,
+    text="Identify all editable text input boxes in the image. Return JSON.",
+    return_tensors="pt"
+).to("cuda")
+
+with torch.no_grad():
+    output = model.generate(**inputs, max_new_tokens=512)
+
+print(processor.decode(output[0], skip_special_tokens=True))
