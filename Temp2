@@ -1,203 +1,80 @@
-import os
-import json
-import torch
-import pandas as pd
-from PIL import Image
-from tqdm import tqdm
-from collections import defaultdict
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
-from transformers import AutoTokenizer, AdamW
+text = prompt + response
 
-# =============================
-# CONFIG
-# =============================
-MODEL_PATH = "./internvl_chat"
-IMAGE_ROOT = "./images"
-CSV_PATH = "./annotations.csv"
-
-IMG_SIZE = 448
-BATCH_SIZE = 1
-EPOCHS = 3
-LR = 2e-5
-DEVICE = "cuda"
-
-# =============================
-# LETTERBOX UTILS
-# =============================
-def letterbox_image(img, size=448, fill=(114,114,114)):
-    w, h = img.size
-    scale = min(size / w, size / h)
-
-    nw, nh = int(w * scale), int(h * scale)
-    img_resized = img.resize((nw, nh), Image.BICUBIC)
-
-    canvas = Image.new("RGB", (size, size), fill)
-    pad_x = (size - nw) // 2
-    pad_y = (size - nh) // 2
-    canvas.paste(img_resized, (pad_x, pad_y))
-
-    meta = dict(
-        scale=scale,
-        pad_x=pad_x,
-        pad_y=pad_y,
-        orig_w=w,
-        orig_h=h,
-    )
-    return canvas, meta
-
-def normalize_box(box, meta):
-    x1, y1, x2, y2 = box
-    x1 = x1 * meta["scale"] + meta["pad_x"]
-    x2 = x2 * meta["scale"] + meta["pad_x"]
-    y1 = y1 * meta["scale"] + meta["pad_y"]
-    y2 = y2 * meta["scale"] + meta["pad_y"]
-    return [
-        round(x1 / IMG_SIZE, 4),
-        round(y1 / IMG_SIZE, 4),
-        round(y1 / IMG_SIZE, 4),
-        round(x2 / IMG_SIZE, 4),
-    ]
-
-# =============================
-# LOAD + GROUP CSV
-# =============================
-df = pd.read_csv(CSV_PATH, encoding="utf-16")
-grouped = defaultdict(list)
-
-for _, r in df.iterrows():
-    grouped[r.image_name].append(
-        (r.x1, r.y1, r.x2, r.y2, r.screen_width, r.screen_height)
-    )
-
-samples = []
-for img, rows in grouped.items():
-    boxes = []
-    for x1, y1, x2, y2, sw, sh in rows:
-        boxes.append([
-            x1 / sw,
-            y1 / sh,
-            x2 / sw,
-            y2 / sh,
-        ])
-
-    samples.append(dict(
-        image=img,
-        boxes=boxes
-    ))
-
-# =============================
-# IMAGE TRANSFORM
-# =============================
-to_tensor = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
-    )
-])
-
-# =============================
-# DATASET
-# =============================
-class EditTextDataset(Dataset):
-    def __init__(self, samples, image_root, tokenizer):
-        self.samples = samples
-        self.image_root = image_root
-        self.tokenizer = tokenizer
-        self.tokenizer.padding_side = "left"
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        s = self.samples[idx]
-
-        img = Image.open(
-            os.path.join(self.image_root, s["image"])
-        ).convert("RGB")
-
-        img_lb, meta = letterbox_image(img)
-
-        norm_boxes = [
-            normalize_box(
-                (
-                    b[0] * meta["orig_w"],
-                    b[1] * meta["orig_h"],
-                    b[2] * meta["orig_w"],
-                    b[3] * meta["orig_h"],
-                ),
-                meta
-            )
-            for b in s["boxes"]
-        ]
-
-        response = json.dumps(norm_boxes)
-
-        prompt = (
-            "<image>\n"
-            "Identify all editable text input boxes in the image. "
-            "Return bounding boxes as JSON using normalized coordinates."
-        )
-
-        enc = self.tokenizer(
-            prompt + response,
-            return_tensors="pt"
-        )
-
-        return {
-            "input_ids": enc["input_ids"].squeeze(0),
-            "attention_mask": enc["attention_mask"].squeeze(0),
-            "pixel_values": to_tensor(img_lb),
-        }
-
-# =============================
-# LOAD MODEL
-# =============================
-from modeling_internvl_chat import InternVLChatModel
-
-tokenizer = AutoTokenizer.from_pretrained(
-    MODEL_PATH,
-    trust_remote_code=True,
-    local_files_only=True
+enc = self.tokenizer(
+    text,
+    return_tensors="pt",
+    truncation=True,
+    max_length=2048,
+    padding=False
 )
 
-model = InternVLChatModel.from_pretrained(
-    MODEL_PATH,
-    torch_dtype=torch.float16,
-    device_map="auto"
+input_ids = enc["input_ids"][0]
+
+# attention_mask MAY be None → handle safely
+attention_mask = enc.get("attention_mask")
+if attention_mask is not None:
+    attention_mask = attention_mask[0]
+
+return {
+    "input_ids": input_ids,
+    "attention_mask": attention_mask,  # can be None
+    "pixel_values": img_tensor,
+}
+
+
+
+
+def collate_fn(batch):
+    input_ids = torch.nn.utils.rnn.pad_sequence(
+        [b["input_ids"] for b in batch],
+        batch_first=True,
+        padding_value=0
+    )
+
+    # attention_mask is optional
+    if batch[0]["attention_mask"] is not None:
+        attention_mask = torch.nn.utils.rnn.pad_sequence(
+            [b["attention_mask"] for b in batch],
+            batch_first=True,
+            padding_value=0
+        )
+    else:
+        attention_mask = None
+
+    pixel_values = torch.stack(
+        [b["pixel_values"] for b in batch]
+    )
+
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "pixel_values": pixel_values,
+    }
+
+
+
+loader = DataLoader(
+    dataset,
+    batch_size=1,
+    shuffle=True,
+    collate_fn=collate_fn
 )
 
-model.train()
 
-# =============================
-# TRAINING
-# =============================
-dataset = EditTextDataset(samples, IMAGE_ROOT, tokenizer)
-loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-optimizer = AdamW(model.parameters(), lr=LR)
+outputs = model(
+    input_ids=batch["input_ids"].to(DEVICE),
+    attention_mask=(
+        batch["attention_mask"].to(DEVICE)
+        if batch["attention_mask"] is not None
+        else None
+    ),
+    pixel_values=batch["pixel_values"].to(DEVICE),
+    labels=batch["input_ids"].to(DEVICE)
+)
 
-for epoch in range(EPOCHS):
-    pbar = tqdm(loader, desc=f"Epoch {epoch}")
-    for batch in pbar:
-        optimizer.zero_grad()
 
-        outputs = model(
-            input_ids=batch["input_ids"].to(DEVICE),
-            attention_mask=batch["attention_mask"].to(DEVICE),
-            pixel_values=batch["pixel_values"].unsqueeze(0).to(DEVICE),
-            labels=batch["input_ids"].to(DEVICE)
-        )
 
-        loss = outputs.loss
-        loss.backward()
-        optimizer.step()
 
-        pbar.set_postfix(loss=loss.item())
 
-# =============================
-# SAVE
-# =============================
-model.save_pretrained("internvl_edittext_letterbox")
-tokenizer.save_pretrained("internvl_edittext_letterbox")
+
