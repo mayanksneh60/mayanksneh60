@@ -1,136 +1,76 @@
-import pandas as pd
-import json
-from collections import defaultdict
+import torch
+from modeling_internvl_chat import InternVLChatModel
+from transformers import AutoTokenizer
 
-CSV_PATH = "annotations.csv"
+MODEL_PATH = "/models/InternVL-Chat-78B"
 
-df = pd.read_csv(CSV_PATH)
+tokenizer = AutoTokenizer.from_pretrained(
+    MODEL_PATH,
+    trust_remote_code=True,
+    local_files_only=True
+)
 
-grouped = defaultdict(list)
+model = InternVLChatModel.from_pretrained(
+    MODEL_PATH,
+    torch_dtype=torch.float16,
+    device_map="auto"
+)
 
-for _, row in df.iterrows():
-    x1 = row.x1 / row.screen_width
-    y1 = row.y1 / row.screen_height
-    x2 = row.x2 / row.screen_width
-    y2 = row.y2 / row.screen_height
 
-    grouped[row.image_name].append({
-        "x1": round(x1, 4),
-        "y1": round(y1, 4),
-        "x2": round(x2, 4),
-        "y2": round(y2, 4)
-    })
 
-samples = []
-for image_name, boxes in grouped.items():
-    samples.append({
-        "image": image_name,
-        "prompt": (
-            "Identify all editable text input boxes in the image. "
-            "Return bounding boxes as JSON using normalized coordinates."
-        ),
-        "response": json.dumps(boxes)
-    })
+from torchvision import transforms
+from PIL import Image
+
+image_transform = transforms.Compose([
+    transforms.Resize((448, 448)),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    )
+])
+
+def load_image(path):
+    img = Image.open(path).convert("RGB")
+    return image_transform(img)
 
 
 
 from torch.utils.data import Dataset
-from PIL import Image
-import torch
 
 class EditTextDataset(Dataset):
-    def __init__(self, samples, image_root, processor):
+    def __init__(self, samples, image_root, tokenizer):
         self.samples = samples
         self.image_root = image_root
-        self.tokenizer = processor.tokenizer
-
-        # InternVL requirement
+        self.tokenizer = tokenizer
         self.tokenizer.padding_side = "left"
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        item = self.samples[idx]
+        s = self.samples[idx]
 
-        image = Image.open(f"{self.image_root}/{item['image']}").convert("RGB")
+        image = load_image(f"{self.image_root}/{s['image']}")
 
-        text_inputs = self.tokenizer(
-            item["prompt"],
-            return_tensors="pt",
-            padding=False
+        prompt = (
+            "<image>\n"
+            "Identify all editable text input boxes in the image. "
+            "Return bounding boxes as JSON using normalized coordinates."
         )
 
-        label_inputs = self.tokenizer(
-            item["response"],
-            return_tensors="pt",
-            padding=False
+        text = prompt + s["response"]
+
+        enc = self.tokenizer(
+            text,
+            return_tensors="pt"
         )
 
         return {
-            "input_ids": text_inputs["input_ids"].squeeze(0),
-            "attention_mask": text_inputs["attention_mask"].squeeze(0),
-            "labels": label_inputs["input_ids"].squeeze(0),
-            "images": image,   # <-- raw PIL image
+            "input_ids": enc["input_ids"].squeeze(0),
+            "attention_mask": enc["attention_mask"].squeeze(0),
+            "pixel_values": image,
         }
-
-
-def collate_fn(batch):
-    return {
-        "input_ids": torch.nn.utils.rnn.pad_sequence(
-            [b["input_ids"] for b in batch],
-            batch_first=True,
-            padding_value=0
-        ),
-        "attention_mask": torch.nn.utils.rnn.pad_sequence(
-            [b["attention_mask"] for b in batch],
-            batch_first=True,
-            padding_value=0
-        ),
-        "labels": torch.nn.utils.rnn.pad_sequence(
-            [b["labels"] for b in batch],
-            batch_first=True,
-            padding_value=-100
-        ),
-        "images": [b["images"] for b in batch],  # list of PIL images
-    }
-
-loader = DataLoader(dataset, batch_size=1, collate_fn=collate_fn)
-
-outputs = model(
-    input_ids=batch["input_ids"].cuda(),
-    attention_mask=batch["attention_mask"].cuda(),
-    images=batch["images"],  # list or PIL
-    labels=batch["labels"].cuda()
-)
-
-
-import torch
-from transformers import AutoModelForCausalLM, AutoProcessor
-from peft import LoraConfig, get_peft_model
-
-MODEL_NAME = "OpenGVLab/InternVL3-78B"
-
-processor = AutoProcessor.from_pretrained(MODEL_NAME)
-
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL_NAME,
-    torch_dtype=torch.float16,
-    device_map="auto"
-)
-
-lora_config = LoraConfig(
-    r=16,
-    lora_alpha=32,
-    lora_dropout=0.05,
-    target_modules=["q_proj", "v_proj"],
-    task_type="CAUSAL_LM"
-)
-
-model = get_peft_model(model, lora_config)
-model.print_trainable_parameters()
-
-
 
 
 
@@ -140,29 +80,22 @@ from torch.utils.data import DataLoader
 from transformers import AdamW
 from tqdm import tqdm
 
-dataset = EditTextDataset(
-    samples=samples,
-    image_root="images",
-    processor=processor
-)
-
 loader = DataLoader(dataset, batch_size=1, shuffle=True)
 
 optimizer = AdamW(model.parameters(), lr=2e-5)
-
 model.train()
 
 for epoch in range(3):
-    loop = tqdm(loader, desc=f"Epoch {epoch}")
+    loop = tqdm(loader)
     for batch in loop:
         optimizer.zero_grad()
 
         outputs = model(
-    input_ids=batch["input_ids"].cuda(),
-    attention_mask=batch["attention_mask"].cuda(),
-    pixel_values=batch["pixel_values"].cuda(),
-    labels=batch["labels"].cuda()
-)
+            input_ids=batch["input_ids"].cuda(),
+            attention_mask=batch["attention_mask"].cuda(),
+            pixel_values=batch["pixel_values"].unsqueeze(0).cuda(),
+            labels=batch["input_ids"].cuda()
+        )
 
         loss = outputs.loss
         loss.backward()
@@ -175,23 +108,146 @@ for epoch in range(3):
 
 
 
-model.save_pretrained("internvl_edittext_lora")
-processor.save_pretrained("internvl_edittext_lora")
 
 
 
 
 
 
-image = Image.open("test.png").convert("RGB")
 
-inputs = processor(
-    images=image,
-    text="Identify all editable text input boxes in the image. Return JSON.",
-    return_tensors="pt"
-).to("cuda")
 
-with torch.no_grad():
-    output = model.generate(**inputs, max_new_tokens=512)
+********
 
-print(processor.decode(output[0], skip_special_tokens=True))
+import torch
+from PIL import Image
+from torchvision import transforms
+import numpy as np
+
+IMG_SIZE = 448
+
+def letterbox_image(img, size=448, fill=(114,114,114)):
+    w, h = img.size
+    scale = min(size / w, size / h)
+
+    nw, nh = int(w * scale), int(h * scale)
+    img_resized = img.resize((nw, nh), Image.BICUBIC)
+
+    canvas = Image.new("RGB", (size, size), fill)
+
+    pad_x = (size - nw) // 2
+    pad_y = (size - nh) // 2
+
+    canvas.paste(img_resized, (pad_x, pad_y))
+
+    meta = {
+        "scale": scale,
+        "pad_x": pad_x,
+        "pad_y": pad_y,
+        "orig_w": w,
+        "orig_h": h,
+    }
+
+    return canvas, meta
+
+
+
+def normalize_box(box, meta, size=448):
+    x1, y1, x2, y2 = box
+
+    x1 = x1 * meta["scale"] + meta["pad_x"]
+    x2 = x2 * meta["scale"] + meta["pad_x"]
+    y1 = y1 * meta["scale"] + meta["pad_y"]
+    y2 = y2 * meta["scale"] + meta["pad_y"]
+
+    return [
+        round(x1 / size, 4),
+        round(y1 / size, 4),
+        round(x2 / size, 4),
+        round(y2 / size, 4),
+    ]
+
+
+
+
+
+from torch.utils.data import Dataset
+from torchvision import transforms
+
+normalize = transforms.Normalize(
+    mean=[0.485, 0.456, 0.406],
+    std=[0.229, 0.224, 0.225]
+)
+
+to_tensor = transforms.ToTensor()
+
+class EditTextDataset(Dataset):
+    def __init__(self, samples, image_root, tokenizer):
+        self.samples = samples
+        self.image_root = image_root
+        self.tokenizer = tokenizer
+        self.tokenizer.padding_side = "left"
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        s = self.samples[idx]
+
+        img = Image.open(f"{self.image_root}/{s['image']}").convert("RGB")
+        img_lb, meta = letterbox_image(img)
+
+        img_tensor = normalize(to_tensor(img_lb))
+
+        prompt = (
+            "<image>\n"
+            "Identify all editable text input boxes in the image. "
+            "Return bounding boxes as JSON using normalized coordinates "
+            "relative to the padded image."
+        )
+
+        enc = self.tokenizer(
+            prompt + s["response"],
+            return_tensors="pt"
+        )
+
+        return {
+            "input_ids": enc["input_ids"].squeeze(0),
+            "attention_mask": enc["attention_mask"].squeeze(0),
+            "pixel_values": img_tensor,
+        }
+
+
+
+
+outputs = model(
+    input_ids=batch["input_ids"].cuda(),
+    attention_mask=batch["attention_mask"].cuda(),
+    pixel_values=batch["pixel_values"].unsqueeze(0).cuda(),
+    labels=batch["input_ids"].cuda()
+)
+
+
+
+
+
+def denormalize_box(norm_box, meta, size=448):
+    x1, y1, x2, y2 = [v * size for v in norm_box]
+
+    x1 = (x1 - meta["pad_x"]) / meta["scale"]
+    x2 = (x2 - meta["pad_x"]) / meta["scale"]
+    y1 = (y1 - meta["pad_y"]) / meta["scale"]
+    y2 = (y2 - meta["pad_y"]) / meta["scale"]
+
+    return [
+        int(max(0, min(x1, meta["orig_w"]))),
+        int(max(0, min(y1, meta["orig_h"]))),
+        int(max(0, min(x2, meta["orig_w"]))),
+        int(max(0, min(y2, meta["orig_h"]))),
+    ]
+
+
+
+
+
+
+
