@@ -1,35 +1,13 @@
-import torch
-import torchvision.transforms as T
-from PIL import Image
-
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD  = [0.229, 0.224, 0.225]
-
-def preprocess_image_internvl3(img: Image.Image, image_size=1024):
-    """
-    InternVL3 requires FIXED square inputs.
-    Aspect ratio is preserved via padding (letterbox).
-    """
-    w, h = img.size
-    scale = image_size / max(w, h)
-    new_w = int(w * scale)
-    new_h = int(h * scale)
-
-    img = img.resize((new_w, new_h), Image.BICUBIC)
-
-    # Convert to tensor
-    img = T.ToTensor()(img)
-
-    # Pad to square
-    pad_w = image_size - new_w
-    pad_h = image_size - new_h
-
-    img = torch.nn.functional.pad(
-        img,
-        (0, pad_w, 0, pad_h),
-        value=0.0
-    )
-
-    img = T.Normalize(IMAGENET_MEAN, IMAGENET_STD)(img)
-
-    return img  # (3, image_size, image_size)
+outputs = model(
+    input_ids=batch["input_ids"].to(DEVICE),
+    attention_mask=(
+        batch["attention_mask"].to(DEVICE)
+        if batch["attention_mask"] is not None
+        else None
+    ),
+    pixel_values=batch["pixel_values"].to(
+        DEVICE,
+        dtype=next(model.parameters()).dtype
+    ),
+    labels=batch["input_ids"].to(DEVICE)
+)
