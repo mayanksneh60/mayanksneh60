@@ -1,27 +1,46 @@
-VISION_DTYPE = next(model.parameters()).dtype
-print("Model dtype:", VISION_DTYPE)
+import math
+import torchvision.transforms as T
+import torch
+from PIL import Image
+
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD  = [0.229, 0.224, 0.225]
+PATCH_SIZE = 14
 
 
-outputs = model(
-    input_ids=batch["input_ids"].to(DEVICE),
-    attention_mask=(
-        batch["attention_mask"].to(DEVICE)
-        if batch["attention_mask"] is not None
-        else None
-    ),
-    pixel_values=batch["pixel_values"].to(DEVICE, dtype=VISION_DTYPE),  # ✅ FIX
-    image_flags=batch["image_flags"].to(DEVICE),
-    labels=batch["input_ids"].to(DEVICE)
-)
+def preprocess_image_internvl(img: Image.Image, max_side=1024):
+    """
+    1. Resize keeping aspect ratio
+    2. Pad so H and W are divisible by 14
+    """
+    w, h = img.size
+    scale = max_side / max(w, h)
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+
+    img = img.resize((new_w, new_h), Image.BICUBIC)
+
+    # Convert to tensor first
+    img = T.ToTensor()(img)
+
+    # Pad to multiple of PATCH_SIZE
+    pad_h = (PATCH_SIZE - img.shape[1] % PATCH_SIZE) % PATCH_SIZE
+    pad_w = (PATCH_SIZE - img.shape[2] % PATCH_SIZE) % PATCH_SIZE
+
+    img = torch.nn.functional.pad(
+        img,
+        (0, pad_w, 0, pad_h),  # (left, right, top, bottom)
+        value=0.0
+    )
+
+    img = T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)(img)
+
+    return img
 
 
 
-pixel_values = torch.stack([b["pixel_values"] for b in batch])
-pixel_values = pixel_values.to(dtype=VISION_DTYPE)
+img_tensor = preprocess_image_internvl(img)
 
 
-
-
-
-print(batch["pixel_values"].dtype)
-print(next(model.parameters()).dtype)
+_, H, W = img_tensor.shape
+assert H % 14 == 0 and W % 14 == 0, (H, W)
