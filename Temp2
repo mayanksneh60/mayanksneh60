@@ -1,36 +1,6 @@
-image_flags = torch.ones(1, dtype=torch.long)
-return {
-    "input_ids": input_ids,
-    "attention_mask": attention_mask,
-    "pixel_values": img_tensor,
-    "image_flags": image_flags
-}
-def collate_fn(batch):
-    input_ids = torch.nn.utils.rnn.pad_sequence(
-        [b["input_ids"] for b in batch],
-        batch_first=True,
-        padding_value=0
-    )
+VISION_DTYPE = next(model.parameters()).dtype
+print("Model dtype:", VISION_DTYPE)
 
-    if batch[0]["attention_mask"] is not None:
-        attention_mask = torch.nn.utils.rnn.pad_sequence(
-            [b["attention_mask"] for b in batch],
-            batch_first=True,
-            padding_value=0
-        )
-    else:
-        attention_mask = None
-
-    pixel_values = torch.stack([b["pixel_values"] for b in batch])
-
-    image_flags = torch.stack([b["image_flags"] for b in batch])
-
-    return {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "pixel_values": pixel_values,
-        "image_flags": image_flags
-    }
 
 outputs = model(
     input_ids=batch["input_ids"].to(DEVICE),
@@ -39,11 +9,19 @@ outputs = model(
         if batch["attention_mask"] is not None
         else None
     ),
-    pixel_values=batch["pixel_values"].to(DEVICE),
+    pixel_values=batch["pixel_values"].to(DEVICE, dtype=VISION_DTYPE),  # ✅ FIX
     image_flags=batch["image_flags"].to(DEVICE),
     labels=batch["input_ids"].to(DEVICE)
 )
 
-batch = next(iter(loader))
-print(batch["image_flags"].shape)
-print(batch["image_flags"])
+
+
+pixel_values = torch.stack([b["pixel_values"] for b in batch])
+pixel_values = pixel_values.to(dtype=VISION_DTYPE)
+
+
+
+
+
+print(batch["pixel_values"].dtype)
+print(next(model.parameters()).dtype)
