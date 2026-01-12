@@ -1,89 +1,11 @@
-import os
-import json
-import torch
-from torch.utils.data import Dataset, DataLoader
-from PIL import Image
-import torchvision.transforms as T
-from transformers import AutoTokenizer, AutoModelForCausalLM
-MODEL_PATH = "/path/to/InternVL3-78B"
-DEVICE = "cuda"
+return {
+    "input_ids": enc["input_ids"][0],
+    "attention_mask": enc.get("attention_mask", None)[0]
+        if enc.get("attention_mask") is not None else None,
+    "pixel_values": pixel_values,
+    "image_flags": torch.tensor([1], dtype=torch.long)
+}
 
-tokenizer = AutoTokenizer.from_pretrained(
-    MODEL_PATH,
-    trust_remote_code=True
-)
-
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL_PATH,
-    torch_dtype=torch.bfloat16,
-    trust_remote_code=True
-).to(DEVICE)
-
-model.train()
-
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD  = [0.229, 0.224, 0.225]
-IMAGE_SIZE = model.config.vision_config.image_size  # usually 1024
-
-def preprocess_image(img: Image.Image):
-    w, h = img.size
-    scale = IMAGE_SIZE / max(w, h)
-    nw, nh = int(w * scale), int(h * scale)
-
-    img = img.resize((nw, nh), Image.BICUBIC)
-    img = T.ToTensor()(img)
-
-    pad_w = IMAGE_SIZE - nw
-    pad_h = IMAGE_SIZE - nh
-
-    img = torch.nn.functional.pad(
-        img, (0, pad_w, 0, pad_h), value=0.0
-    )
-
-    img = T.Normalize(IMAGENET_MEAN, IMAGENET_STD)(img)
-    return img
-
-class EditTextDataset(Dataset):
-    def __init__(self, samples, image_root, tokenizer):
-        self.samples = samples
-        self.image_root = image_root
-        self.tokenizer = tokenizer
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        sample = self.samples[idx]
-
-        # Image
-        img_path = os.path.join(self.image_root, sample["image"])
-        img = Image.open(img_path).convert("RGB")
-        pixel_values = preprocess_image(img)
-
-        # Text
-        prompt = (
-            "<image>\n"
-            "Identify all edit text boxes in the image. "
-            "Return bounding boxes as JSON array in normalized coordinates.\n"
-        )
-
-        response = json.dumps(sample["boxes"], separators=(",", ":"))
-        text = prompt + response
-
-        enc = self.tokenizer(
-            text,
-            return_tensors="pt",
-            truncation=True,
-            max_length=4096,
-            padding=False
-        )
-
-        return {
-            "input_ids": enc["input_ids"][0],
-            "attention_mask": enc.get("attention_mask", None)[0]
-            if enc.get("attention_mask") is not None else None,
-            "pixel_values": pixel_values
-        }
 
 def collate_fn(batch):
     input_ids = torch.nn.utils.rnn.pad_sequence(
@@ -92,58 +14,44 @@ def collate_fn(batch):
         padding_value=tokenizer.pad_token_id or 0
     )
 
-    if batch[0]["attention_mask"] is not None:
-        attention_mask = torch.nn.utils.rnn.pad_sequence(
+    attention_mask = (
+        torch.nn.utils.rnn.pad_sequence(
             [b["attention_mask"] for b in batch],
             batch_first=True,
             padding_value=0
         )
-    else:
-        attention_mask = None
+        if batch[0]["attention_mask"] is not None
+        else None
+    )
 
     pixel_values = torch.stack([b["pixel_values"] for b in batch])
+    image_flags = torch.stack([b["image_flags"] for b in batch])  # [B,1]
 
     return {
         "input_ids": input_ids,
         "attention_mask": attention_mask,
-        "pixel_values": pixel_values
+        "pixel_values": pixel_values,
+        "image_flags": image_flags
     }
 
 
-
-loader = DataLoader(
-    dataset,
-    batch_size=1,
-    shuffle=True,
-    collate_fn=collate_fn
+outputs = model(
+    input_ids=batch["input_ids"].to(DEVICE),
+    attention_mask=(
+        batch["attention_mask"].to(DEVICE)
+        if batch["attention_mask"] is not None
+        else None
+    ),
+    pixel_values=batch["pixel_values"].to(
+        DEVICE,
+        dtype=next(model.parameters()).dtype
+    ),
+    image_flags=batch["image_flags"].to(DEVICE),
+    labels=batch["input_ids"].to(DEVICE)
 )
 
-optimizer = torch.optim.AdamW(
-    model.parameters(),
-    lr=1e-5
-)
 
-for epoch in range(epochs):
-    for batch in loader:
-        optimizer.zero_grad()
 
-        outputs = model(
-            input_ids=batch["input_ids"].to(DEVICE),
-            attention_mask=(
-                batch["attention_mask"].to(DEVICE)
-                if batch["attention_mask"] is not None
-                else None
-            ),
-            pixel_values=batch["pixel_values"].to(
-                DEVICE,
-                dtype=next(model.parameters()).dtype
-            ),
-            labels=batch["input_ids"].to(DEVICE)
-        )
 
-        loss = outputs.loss
-        loss.backward()
-        optimizer.step()
 
-        print("loss:", loss.item())
 
