@@ -1,47 +1,11 @@
-return {
-    "input_ids": enc["input_ids"][0],
-    "attention_mask": enc.get("attention_mask", None)[0]
-        if enc.get("attention_mask") is not None else None,
-    "pixel_values": pixel_values,
-    "image_flags": torch.tensor([1], dtype=torch.long)
-}
-
-
-def collate_fn(batch):
-    input_ids = torch.nn.utils.rnn.pad_sequence(
-        [b["input_ids"] for b in batch],
-        batch_first=True,
-        padding_value=tokenizer.pad_token_id or 0
-    )
-
-    attention_mask = (
-        torch.nn.utils.rnn.pad_sequence(
-            [b["attention_mask"] for b in batch],
-            batch_first=True,
-            padding_value=0
-        )
-        if batch[0]["attention_mask"] is not None
-        else None
-    )
-
-    pixel_values = torch.stack([b["pixel_values"] for b in batch])
-    image_flags = torch.stack([b["image_flags"] for b in batch])  # [B,1]
-
-    return {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "pixel_values": pixel_values,
-        "image_flags": image_flags
-    }
+assert isinstance(batch["image_flags"], torch.Tensor)
+assert batch["image_flags"].ndim == 2
+assert batch["image_flags"].shape[1] == 2
 
 
 outputs = model(
     input_ids=batch["input_ids"].to(DEVICE),
-    attention_mask=(
-        batch["attention_mask"].to(DEVICE)
-        if batch["attention_mask"] is not None
-        else None
-    ),
+    attention_mask=batch["attention_mask"].to(DEVICE),
     pixel_values=batch["pixel_values"].to(
         DEVICE,
         dtype=next(model.parameters()).dtype
@@ -49,9 +13,3 @@ outputs = model(
     image_flags=batch["image_flags"].to(DEVICE),
     labels=batch["input_ids"].to(DEVICE)
 )
-
-
-
-
-
-
