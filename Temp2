@@ -1,26 +1,69 @@
 import os
+import csv
+from collections import defaultdict
+
 import torch
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 import torchvision.transforms as T
 
-from transformers import (
-    AutoTokenizer,
-    AutoModelForCausalLM,
-    AdamW,
-)
+from transformers import AutoTokenizer, AutoModelForCausalLM, AdamW
 
 # =========================================================
 # CONFIG
 # =========================================================
 MODEL_PATH = "/path/to/offline/InternVL3-78B"
+CSV_PATH = "/path/to/annotations.csv"
 IMAGE_ROOT = "/path/to/images"
+
+DEVICE = "cuda"
 BATCH_SIZE = 1
-LR = 1e-5
 EPOCHS = 1
+LR = 1e-5
+
 IMAGE_SIZE = 448
 IMAGE_TOKEN_SIZE = 256
-DEVICE = "cuda"
+
+# =========================================================
+# CSV LOADING (ROBUST)
+# =========================================================
+def load_samples_from_csv(csv_path):
+    grouped = defaultdict(list)
+
+    with open(csv_path, "rb") as f:
+        raw = f.read()
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("utf-16")
+
+    reader = csv.DictReader(text.splitlines())
+
+    for row in reader:
+        img = row["image_name"]
+
+        x1 = float(row["x1"])
+        y1 = float(row["y1"])
+        x2 = float(row["x2"])
+        y2 = float(row["y2"])
+        sw = float(row["screen_width"])
+        sh = float(row["screen_height"])
+
+        grouped[img].append([
+            x1 / sw,
+            y1 / sh,
+            x2 / sw,
+            y2 / sh,
+        ])
+
+    samples = [
+        {"image": img, "boxes": boxes}
+        for img, boxes in grouped.items()
+    ]
+
+    print(f"Loaded {len(samples)} images from CSV")
+    return samples
 
 # =========================================================
 # DATASET
@@ -45,7 +88,7 @@ class EditTextDataset(Dataset):
         ])
 
         assert hasattr(tokenizer, "image_token"), \
-            "Tokenizer must have image_token (InternVL tokenizer)"
+            "InternVL tokenizer must have image_token"
 
     def __len__(self):
         return len(self.samples)
@@ -59,15 +102,15 @@ class EditTextDataset(Dataset):
         pixel_values = self.transform(image)  # [3,H,W]
 
         # ---------- TARGET ----------
-        boxes = sample["boxes"]
         target_text = "; ".join(
             f"[{b[0]:.4f},{b[1]:.4f},{b[2]:.4f},{b[3]:.4f}]"
-            for b in boxes
+            for b in sample["boxes"]
         )
 
         # ---------- PROMPT ----------
-        IMAGE_TOKEN = self.tokenizer.image_token
-        image_tokens = " ".join([IMAGE_TOKEN] * IMAGE_TOKEN_SIZE)
+        image_tokens = " ".join(
+            [self.tokenizer.image_token] * IMAGE_TOKEN_SIZE
+        )
 
         prompt = (
             f"{image_tokens}\n"
@@ -88,11 +131,10 @@ class EditTextDataset(Dataset):
         image_flags = torch.zeros_like(input_ids, dtype=torch.long)
         image_flags[:IMAGE_TOKEN_SIZE] = 1
 
-        # ---------- ASSERTS (CRITICAL) ----------
-        assert input_ids.ndim == 1
-        assert image_flags.shape == input_ids.shape
+        # ---------- ASSERTS ----------
         assert image_flags.sum().item() == IMAGE_TOKEN_SIZE
         assert input_ids.shape[0] >= IMAGE_TOKEN_SIZE
+        assert image_flags.shape == input_ids.shape
 
         return {
             "input_ids": input_ids,
@@ -107,14 +149,15 @@ class EditTextDataset(Dataset):
 def collate_fn(batch):
     max_len = max(len(x["input_ids"]) for x in batch)
 
-    def pad_1d(x, value=0):
-        return torch.cat(
-            [x, torch.full((max_len - len(x),), value, dtype=x.dtype)]
-        )
+    def pad(x, value=0):
+        return torch.cat([
+            x,
+            torch.full((max_len - len(x),), value, dtype=x.dtype)
+        ])
 
-    input_ids = torch.stack([pad_1d(x["input_ids"]) for x in batch])
-    attention_mask = torch.stack([pad_1d(x["attention_mask"]) for x in batch])
-    image_flags = torch.stack([pad_1d(x["image_flags"]) for x in batch])
+    input_ids = torch.stack([pad(x["input_ids"]) for x in batch])
+    attention_mask = torch.stack([pad(x["attention_mask"]) for x in batch])
+    image_flags = torch.stack([pad(x["image_flags"]) for x in batch])
     pixel_values = torch.stack([x["pixel_values"] for x in batch])
 
     return {
@@ -122,66 +165,69 @@ def collate_fn(batch):
         "attention_mask": attention_mask,
         "pixel_values": pixel_values,
         "image_flags": image_flags,
-        "labels": input_ids.clone(),  # causal LM
+        "labels": input_ids.clone(),
     }
 
 # =========================================================
-# LOAD MODEL & TOKENIZER
+# MAIN
 # =========================================================
-tokenizer = AutoTokenizer.from_pretrained(
-    MODEL_PATH,
-    trust_remote_code=True
-)
+def main():
+    # ----- Load data -----
+    samples = load_samples_from_csv(CSV_PATH)
 
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL_PATH,
-    torch_dtype=torch.bfloat16,
-    trust_remote_code=True
-).to(DEVICE)
+    # ----- Load tokenizer & model -----
+    tokenizer = AutoTokenizer.from_pretrained(
+        MODEL_PATH,
+        trust_remote_code=True
+    )
 
-model.train()
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_PATH,
+        torch_dtype=torch.bfloat16,
+        trust_remote_code=True
+    ).to(DEVICE)
+
+    model.train()
+
+    # ----- Dataset -----
+    dataset = EditTextDataset(samples, IMAGE_ROOT, tokenizer)
+    loader = DataLoader(
+        dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        collate_fn=collate_fn
+    )
+
+    # ----- Optimizer -----
+    optimizer = AdamW(model.parameters(), lr=LR)
+
+    # ----- Training loop -----
+    for epoch in range(EPOCHS):
+        for step, batch in enumerate(loader):
+            for k in batch:
+                batch[k] = batch[k].to(DEVICE)
+
+            outputs = model(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                pixel_values=batch["pixel_values"],
+                image_flags=batch["image_flags"],
+                labels=batch["labels"],
+            )
+
+            loss = outputs.loss
+            loss.backward()
+
+            optimizer.step()
+            optimizer.zero_grad()
+
+            if step % 10 == 0:
+                print(f"Epoch {epoch} Step {step} Loss {loss.item():.4f}")
+
+    print("✅ Training complete")
 
 # =========================================================
-# DATA
+# ENTRY
 # =========================================================
-# samples = [{"image": "...png", "boxes": [[x1,y1,x2,y2], ...]}, ...]
-# YOU ALREADY CREATED THIS CORRECTLY
-dataset = EditTextDataset(samples, IMAGE_ROOT, tokenizer)
-loader = DataLoader(
-    dataset,
-    batch_size=BATCH_SIZE,
-    shuffle=True,
-    collate_fn=collate_fn
-)
-
-# =========================================================
-# OPTIMIZER
-# =========================================================
-optimizer = AdamW(model.parameters(), lr=LR)
-
-# =========================================================
-# TRAINING LOOP
-# =========================================================
-for epoch in range(EPOCHS):
-    for step, batch in enumerate(loader):
-        for k in batch:
-            batch[k] = batch[k].to(DEVICE)
-
-        outputs = model(
-            input_ids=batch["input_ids"],
-            attention_mask=batch["attention_mask"],
-            pixel_values=batch["pixel_values"],
-            image_flags=batch["image_flags"],
-            labels=batch["labels"],
-        )
-
-        loss = outputs.loss
-        loss.backward()
-
-        optimizer.step()
-        optimizer.zero_grad()
-
-        if step % 10 == 0:
-            print(f"Epoch {epoch} Step {step} Loss {loss.item():.4f}")
-
-print("✅ Training complete")
+if __name__ == "__main__":
+    main()
