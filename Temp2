@@ -1,42 +1,94 @@
-def __getitem__(self, idx):
-    sample = self.samples[idx]
+import torch
+from torch.utils.data import Dataset
+from PIL import Image
+import torchvision.transforms as T
 
-    # ----- image -----
-    image = Image.open(sample["image"]).convert("RGB")
-    pixel_values = image_transform(image)
 
-    # ----- target -----
-    boxes = sample["boxes"]
-    target_text = "; ".join(
-        [f"[{b[0]:.3f},{b[1]:.3f},{b[2]:.3f},{b[3]:.3f}]" for b in boxes]
-    )
+class EditTextDataset(Dataset):
+    def __init__(
+        self,
+        samples,
+        image_root,
+        tokenizer,
+        image_size=448,
+        image_token_size=256,
+    ):
+        self.samples = samples
+        self.image_root = image_root
+        self.tokenizer = tokenizer
+        self.image_token_size = image_token_size
 
-    IMAGE_TOKEN_SIZE = 256
-    IMAGE_TOKEN = tokenizer.image_token
+        # --- InternVL-safe image preprocessing (keeps aspect ratio) ---
+        self.image_transform = T.Compose([
+            T.Resize(
+                image_size,
+                interpolation=T.InterpolationMode.BICUBIC,
+                max_size=image_size
+            ),
+            T.ToTensor(),
+            T.Normalize(
+                mean=(0.485, 0.456, 0.406),
+                std=(0.229, 0.224, 0.225)
+            )
+        ])
 
-    image_tokens = " ".join([IMAGE_TOKEN] * IMAGE_TOKEN_SIZE)
+        assert hasattr(tokenizer, "image_token"), \
+            "Tokenizer must have image_token (InternVL tokenizer)"
 
-    prompt = (
-        f"{image_tokens}\n"
-        "Detect all edit text boxes and output normalized bounding boxes.\n"
-        f"{target_text}"
-    )
+    def __len__(self):
+        return len(self.samples)
 
-    inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=True)
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
 
-    input_ids = inputs["input_ids"][0]
-    attention_mask = inputs["attention_mask"][0]
+        # ================= IMAGE =================
+        image_path = f"{self.image_root}/{sample['image']}"
+        image = Image.open(image_path).convert("RGB")
+        pixel_values = self.image_transform(image)
 
-    image_flags = torch.zeros_like(input_ids)
-    image_flags[:IMAGE_TOKEN_SIZE] = 1
+        # ================= TARGET TEXT =================
+        boxes = sample["boxes"]
+        target_text = "; ".join(
+            [f"[{b[0]:.4f},{b[1]:.4f},{b[2]:.4f},{b[3]:.4f}]" for b in boxes]
+        )
 
-    # ----- asserts -----
-    assert image_flags.shape == input_ids.shape
-    assert image_flags.sum().item() == IMAGE_TOKEN_SIZE
+        # ================= PROMPT =================
+        IMAGE_TOKEN = self.tokenizer.image_token
+        IMAGE_TOKEN_SIZE = self.image_token_size
 
-    return {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "pixel_values": pixel_values,
-        "image_flags": image_flags,
-    }
+        image_tokens = " ".join([IMAGE_TOKEN] * IMAGE_TOKEN_SIZE)
+
+        prompt = (
+            f"{image_tokens}\n"
+            "Detect all edit text boxes and output normalized bounding boxes.\n"
+            f"{target_text}"
+        )
+
+        # ================= TOKENIZE =================
+        tokenized = self.tokenizer(
+            prompt,
+            return_tensors="pt",
+            add_special_tokens=True
+        )
+
+        input_ids = tokenized["input_ids"][0]
+        attention_mask = tokenized["attention_mask"][0]
+
+        # ================= IMAGE FLAGS =================
+        image_flags = torch.zeros_like(input_ids)
+        image_flags[:IMAGE_TOKEN_SIZE] = 1
+
+        # ================= ASSERTS (CRITICAL) =================
+        assert input_ids.ndim == 1
+        assert image_flags.shape == input_ids.shape
+        assert image_flags.sum().item() == IMAGE_TOKEN_SIZE, \
+            f"Expected {IMAGE_TOKEN_SIZE} image tokens, got {image_flags.sum().item()}"
+        assert input_ids.shape[0] >= IMAGE_TOKEN_SIZE, \
+            "Prompt too short for image tokens"
+
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "pixel_values": pixel_values,
+            "image_flags": image_flags,
+        }
