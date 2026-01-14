@@ -31,7 +31,7 @@ class EditTextDataset(Dataset):
             for b in sample["boxes"]
         )
 
-        # -------- TOKENIZE TEXT (NO IMAGE TOKENS YET) --------
+        # -------- TEXT TOKENS --------
         text_ids = self.tokenizer(
             "Detect all edit text boxes and output normalized bounding boxes.\n"
             + target_text,
@@ -39,7 +39,7 @@ class EditTextDataset(Dataset):
             add_special_tokens=True
         ).input_ids[0]
 
-        # -------- PREPEND IMAGE TOKENS (BY ID) --------
+        # -------- IMAGE TOKENS (BY ID) --------
         image_ids = torch.full(
             (IMAGE_TOKEN_SIZE,),
             self.image_token_id,
@@ -47,7 +47,6 @@ class EditTextDataset(Dataset):
         )
 
         input_ids = torch.cat([image_ids, text_ids], dim=0)
-
         attention_mask = torch.ones_like(input_ids)
 
         # -------- IMAGE FLAGS --------
@@ -66,7 +65,18 @@ class EditTextDataset(Dataset):
         }
 
 
-image_token_id = model.config.image_token_id
+
+
+tokenizer = AutoTokenizer.from_pretrained(
+    MODEL_PATH,
+    trust_remote_code=True
+)
+
+IMAGE_TOKEN = "<image>"
+image_token_id = tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
+
+if image_token_id == tokenizer.unk_token_id:
+    raise RuntimeError("<image> token missing from tokenizer vocab")
 
 dataset = EditTextDataset(
     samples,
