@@ -1,24 +1,60 @@
-old_embed = model.get_input_embeddings()
-old_num_tokens, embed_dim = old_embed.weight.shape
+def __getitem__(self, idx):
+    sample = self.samples[idx]
+    image_path = os.path.join(IMAGE_ROOT, sample["image"])
 
-new_num_tokens = len(tokenizer)
+    # ---------- IMAGE ----------
+    image = Image.open(image_path).convert("RGB")
+    pixel_values = image_transform(image)
 
-if new_num_tokens > old_num_tokens:
-    new_embed = torch.nn.Embedding(
-        new_num_tokens,
-        embed_dim,
-        device=old_embed.weight.device,
-        dtype=old_embed.weight.dtype,
+    # ---------- TARGET TEXT ----------
+    boxes = sample["boxes"]
+    target_text = "; ".join(
+        [f"[{b[0]:.3f},{b[1]:.3f},{b[2]:.3f},{b[3]:.3f}]" for b in boxes]
     )
 
-    # copy existing weights
-    new_embed.weight.data[:old_num_tokens] = old_embed.weight.data
-
-    # init new token(s)
-    torch.nn.init.normal_(
-        new_embed.weight.data[old_num_tokens:],
-        mean=0.0,
-        std=embed_dim ** -0.5,
+    prompt = (
+        "<image>\n"
+        "Detect all edit text boxes and output normalized bounding boxes.\n"
+        f"{target_text}"
     )
 
-    model.set_input_embeddings(new_embed)
+    # ---------- TOKENIZE (ALWAYS FIRST) ----------
+    inputs = tokenizer(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=True
+    )
+
+    input_ids = inputs["input_ids"][0]          # ✅ ALWAYS defined
+    attention_mask = inputs["attention_mask"][0]
+
+    # ---------- IMAGE FLAGS ----------
+    image_flags = torch.zeros_like(input_ids)
+
+    image_token_id = tokenizer.convert_tokens_to_ids("<image>")
+    assert image_token_id != tokenizer.unk_token_id, "<image> token missing"
+
+    matches = (input_ids == image_token_id).nonzero(as_tuple=False)
+    assert matches.numel() > 0, "<image> token not found in input_ids"
+
+    image_pos = matches[0].item()
+
+    start = image_pos + 1
+    end = start + IMAGE_TOKEN_LEN
+
+    assert end <= input_ids.shape[0], (
+        f"Prompt too short for image tokens: need {IMAGE_TOKEN_LEN}"
+    )
+
+    image_flags[start:end] = 1
+
+    # ---------- FINAL ASSERTS ----------
+    assert image_flags.shape == input_ids.shape
+    assert image_flags.sum().item() == IMAGE_TOKEN_LEN
+
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "pixel_values": pixel_values,
+        "image_flags": image_flags,
+    }
