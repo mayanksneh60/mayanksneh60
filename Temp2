@@ -1,23 +1,24 @@
-SPECIAL_TOKENS = {
-    "additional_special_tokens": ["<image>"]
-}
+old_embed = model.get_input_embeddings()
+old_num_tokens, embed_dim = old_embed.weight.shape
 
-num_added = tokenizer.add_special_tokens(SPECIAL_TOKENS)
-print("Added special tokens:", num_added)
+new_num_tokens = len(tokenizer)
 
-if num_added > 0:
-    model.resize_token_embeddings(len(tokenizer))
+if new_num_tokens > old_num_tokens:
+    new_embed = torch.nn.Embedding(
+        new_num_tokens,
+        embed_dim,
+        device=old_embed.weight.device,
+        dtype=old_embed.weight.dtype,
+    )
 
+    # copy existing weights
+    new_embed.weight.data[:old_num_tokens] = old_embed.weight.data
 
+    # init new token(s)
+    torch.nn.init.normal_(
+        new_embed.weight.data[old_num_tokens:],
+        mean=0.0,
+        std=embed_dim ** -0.5,
+    )
 
-image_token_id = tokenizer.convert_tokens_to_ids("<image>")
-print("Image token id:", image_token_id)
-
-assert image_token_id != tokenizer.unk_token_id
-assert image_token_id is not None
-
-
-
-assert (input_ids == image_token_id).any(), \
-    "ERROR: <image> token not found in input_ids"
-
+    model.set_input_embeddings(new_embed)
