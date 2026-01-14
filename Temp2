@@ -1,86 +1,14 @@
-class EditTextDataset(Dataset):
-    def __init__(self, samples, image_root, tokenizer, image_token_id):
-        self.samples = samples
-        self.image_root = image_root
-        self.tokenizer = tokenizer
-        self.image_token_id = image_token_id
+# Image tokens replaced with zeros
+image_ids = torch.zeros(IMAGE_TOKEN_SIZE, dtype=torch.long)
+image_flags = torch.ones(IMAGE_TOKEN_SIZE, dtype=torch.long)
 
-        self.transform = T.Compose([
-            T.Resize(IMAGE_SIZE, interpolation=T.InterpolationMode.BICUBIC),
-            T.ToTensor(),
-            T.Normalize(
-                mean=(0.485, 0.456, 0.406),
-                std=(0.229, 0.224, 0.225)
-            )
-        ])
+text_ids = tokenizer(
+    "Detect all edit text boxes and output normalized bounding boxes.\n" +
+    target_text,
+    return_tensors="pt",
+    add_special_tokens=True
+).input_ids[0]
 
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        sample = self.samples[idx]
-
-        # -------- IMAGE --------
-        img_path = os.path.join(self.image_root, sample["image"])
-        image = Image.open(img_path).convert("RGB")
-        pixel_values = self.transform(image)
-
-        # -------- TARGET TEXT --------
-        target_text = "; ".join(
-            f"[{b[0]:.4f},{b[1]:.4f},{b[2]:.4f},{b[3]:.4f}]"
-            for b in sample["boxes"]
-        )
-
-        # -------- TEXT TOKENS --------
-        text_ids = self.tokenizer(
-            "Detect all edit text boxes and output normalized bounding boxes.\n"
-            + target_text,
-            return_tensors="pt",
-            add_special_tokens=True
-        ).input_ids[0]
-
-        # -------- IMAGE TOKENS (BY ID) --------
-        image_ids = torch.full(
-            (IMAGE_TOKEN_SIZE,),
-            self.image_token_id,
-            dtype=torch.long
-        )
-
-        input_ids = torch.cat([image_ids, text_ids], dim=0)
-        attention_mask = torch.ones_like(input_ids)
-
-        # -------- IMAGE FLAGS --------
-        image_flags = torch.zeros_like(input_ids)
-        image_flags[:IMAGE_TOKEN_SIZE] = 1
-
-        # -------- ASSERTS --------
-        assert image_flags.sum().item() == IMAGE_TOKEN_SIZE
-        assert input_ids.max().item() < self.tokenizer.vocab_size
-
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "pixel_values": pixel_values,
-            "image_flags": image_flags,
-        }
-
-
-
-
-tokenizer = AutoTokenizer.from_pretrained(
-    MODEL_PATH,
-    trust_remote_code=True
-)
-
-IMAGE_TOKEN = "<image>"
-image_token_id = tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
-
-if image_token_id == tokenizer.unk_token_id:
-    raise RuntimeError("<image> token missing from tokenizer vocab")
-
-dataset = EditTextDataset(
-    samples,
-    IMAGE_ROOT,
-    tokenizer,
-    image_token_id
-)
+input_ids = torch.cat([image_ids, text_ids], dim=0)
+attention_mask = torch.ones_like(input_ids)
+image_flags = torch.cat([image_flags, torch.zeros_like(text_ids)], dim=0)
