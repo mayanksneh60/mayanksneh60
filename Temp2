@@ -1,209 +1,44 @@
-import os
-import csv
-import math
-import torch
-import torchvision.transforms as T
-from torch.utils.data import Dataset, DataLoader
-from PIL import Image
-from transformers import AutoModel, AutoTokenizer
-from torchvision.transforms.functional import InterpolationMode
-
-IMAGE_SIZE = 448
-MAX_TILES = 12
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
-
-MODEL_PATH = "./InternVL3-78B"
-IMAGE_ROOT = "./images"
-CSV_PATH = "./annotations.csv"
-
-
-def build_transform(input_size):
-    return T.Compose([
-        T.Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
-        T.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
-        T.ToTensor(),
-        T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-    ])
-
-def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_size):
-    best_ratio_diff = float("inf")
-    best_ratio = (1, 1)
-    area = width * height
-
-    for ratio in target_ratios:
-        target_ar = ratio[0] / ratio[1]
-        diff = abs(aspect_ratio - target_ar)
-        if diff < best_ratio_diff:
-            best_ratio_diff = diff
-            best_ratio = ratio
-        elif diff == best_ratio_diff:
-            if area > 0.5 * image_size * image_size * ratio[0] * ratio[1]:
-                best_ratio = ratio
-
-    return best_ratio
-
-def dynamic_preprocess(image, min_num=1, max_num=12, image_size=448, use_thumbnail=True):
-    w, h = image.size
-    aspect_ratio = w / h
-
-    target_ratios = sorted(
-        {(i, j)
-         for n in range(min_num, max_num + 1)
-         for i in range(1, n + 1)
-         for j in range(1, n + 1)
-         if min_num <= i * j <= max_num},
-        key=lambda x: x[0] * x[1]
-    )
-
-    ratio = find_closest_aspect_ratio(aspect_ratio, target_ratios, w, h, image_size)
-    target_w = ratio[0] * image_size
-    target_h = ratio[1] * image_size
-    blocks = ratio[0] * ratio[1]
-
-    resized = image.resize((target_w, target_h))
-    images = []
-
-    for i in range(blocks):
-        box = (
-            (i % (target_w // image_size)) * image_size,
-            (i // (target_w // image_size)) * image_size,
-            ((i % (target_w // image_size)) + 1) * image_size,
-            ((i // (target_w // image_size)) + 1) * image_size,
-        )
-        images.append(resized.crop(box))
-
-    if use_thumbnail and blocks != 1:
-        images.append(image.resize((image_size, image_size)))
-
-    return images
-
-def load_image(image_path, input_size=448, max_num=12):
-    image = Image.open(image_path).convert("RGB")
-    transform = build_transform(input_size)
-    images = dynamic_preprocess(image, max_num=max_num, image_size=input_size)
-    pixel_values = torch.stack([transform(img) for img in images])
-    return pixel_values
-
-def load_annotations(csv_path):
-    grouped = {}
-    with open(csv_path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            img = row["image_name"]
-            box = [
-                float(row["x1"]) / float(row["screen_width"]),
-                float(row["y1"]) / float(row["screen_height"]),
-                float(row["x2"]) / float(row["screen_width"]),
-                float(row["y2"]) / float(row["screen_height"]),
-            ]
-            grouped.setdefault(img, []).append(box)
-    return grouped
-
-class EditTextDataset(Dataset):
-    def __init__(self, grouped_boxes, image_root):
-        self.samples = []
-        for img, boxes in grouped_boxes.items():
-            self.samples.append({
-                "image": img,
-                "boxes": boxes
-            })
-        self.image_root = image_root
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        sample = self.samples[idx]
-
-        image_path = os.path.join(self.image_root, sample["image"])
-        pixel_values = load_image(image_path)
-        pixel_values = pixel_values.to(torch.bfloat16)
-
-        # Text supervision (example)
-        target_text = "Edit text boxes:\n"
-        for b in sample["boxes"]:
-            target_text += f"{b}\n"
-
-        prompt = "<image>\nDetect all edit text boxes."
-
-        return {
-            "pixel_values": pixel_values,
-            "prompt": prompt,
-            "target": target_text
-        }
-
 def collate_fn(batch, tokenizer):
-    assert len(batch) == 1, "Use batch_size=1 for InternVL"
+    assert len(batch) == 1, "InternVL requires batch_size=1"
 
     item = batch[0]
 
-    text = item["prompt"].replace("<image>", "").strip()
-    target = item["target"]
+    # Remove <image> from text BEFORE tokenization
+    prompt_text = item["prompt"].replace("<image>", "").strip()
+    target_text = item["target"]
+
+    full_text = prompt_text + "\n" + target_text
 
     tokens = tokenizer(
-        text + "\n" + target,
+        full_text,
         return_tensors="pt",
         add_special_tokens=True
     )
 
-    pixel_values = item["pixel_values"]
-    image_flags = torch.ones(
-        pixel_values.shape[0],
-        dtype=torch.bool
-    )
+    input_ids = tokens.input_ids           # [1, L]
+    attention_mask = tokens.attention_mask # [1, L]
+
+    pixel_values = item["pixel_values"]    # [N, 3, 448, 448]
+
+    # 🔴 THIS IS THE KEY FIX 🔴
+    # image_flags MUST match input_ids length
+    image_flags = torch.zeros_like(input_ids, dtype=torch.bool)
+
+    # InternVL replaces FIRST K tokens with vision embeddings
+    num_image_tokens = min(pixel_values.shape[0], input_ids.shape[1])
+    image_flags[0, :num_image_tokens] = True
 
     return {
-        "input_ids": tokens.input_ids,
-        "attention_mask": tokens.attention_mask,
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
         "pixel_values": pixel_values,
         "image_flags": image_flags
     }
 
-model = AutoModel.from_pretrained(
-    MODEL_PATH,
-    torch_dtype=torch.bfloat16,
-    trust_remote_code=True,
-    low_cpu_mem_usage=True
-).cuda()
 
-tokenizer = AutoTokenizer.from_pretrained(
-    MODEL_PATH,
-    trust_remote_code=True,
-    use_fast=False
-)
+assert isinstance(batch["image_flags"], torch.Tensor)
+assert batch["image_flags"].dtype == torch.bool
+assert batch["image_flags"].dim() == 2
+assert batch["image_flags"].shape == batch["input_ids"].shape
 
-model.train()
-
-grouped_boxes = load_annotations(CSV_PATH)
-dataset = EditTextDataset(grouped_boxes, IMAGE_ROOT)
-
-loader = DataLoader(
-    dataset,
-    batch_size=1,
-    shuffle=True,
-    collate_fn=lambda b: collate_fn(b, tokenizer)
-)
-
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
-
-for epoch in range(1):
-    for step, batch in enumerate(loader):
-        batch = {k: v.cuda() for k, v in batch.items()}
-
-        outputs = model(
-            input_ids=batch["input_ids"],
-            attention_mask=batch["attention_mask"],
-            pixel_values=batch["pixel_values"],
-            image_flags=batch["image_flags"],
-            labels=batch["input_ids"],
-            return_dict=True
-        )
-
-        loss = outputs.loss
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
-
-        print(f"Step {step} | Loss {loss.item():.4f}")
 
