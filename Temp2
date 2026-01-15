@@ -1,42 +1,168 @@
+import os
+import csv
+import torch
+import torchvision.transforms as T
+from torch.utils.data import Dataset, DataLoader
+from PIL import Image
+from transformers import AutoModel, AutoTokenizer
+from torchvision.transforms.functional import InterpolationMode
+MODEL_PATH = "./InternVL3-78B"   # offline path
+IMAGE_ROOT = "./images"
+CSV_PATH = "./annotations.csv"
+
+IMAGE_SIZE = 448
+MAX_TILES = 12
+
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+def build_transform(input_size):
+    return T.Compose([
+        T.Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
+        T.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
+        T.ToTensor(),
+        T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+    ])
+def dynamic_preprocess(image, image_size=448, max_num=12):
+    w, h = image.size
+    aspect_ratio = w / h
+
+    ratios = sorted(
+        {(i, j)
+         for n in range(1, max_num + 1)
+         for i in range(1, n + 1)
+         for j in range(1, n + 1)
+         if i * j <= max_num},
+        key=lambda x: x[0] * x[1]
+    )
+
+    best = ratios[0]
+    best_diff = 1e9
+    for r in ratios:
+        diff = abs(aspect_ratio - r[0] / r[1])
+        if diff < best_diff:
+            best = r
+            best_diff = diff
+
+    tw, th = best[0] * image_size, best[1] * image_size
+    resized = image.resize((tw, th))
+
+    tiles = []
+    for i in range(best[0] * best[1]):
+        box = (
+            (i % best[0]) * image_size,
+            (i // best[0]) * image_size,
+            ((i % best[0]) + 1) * image_size,
+            ((i // best[0]) + 1) * image_size,
+        )
+        tiles.append(resized.crop(box))
+
+    if len(tiles) > 1:
+        tiles.append(image.resize((image_size, image_size)))
+
+    return tiles
+
+
+def load_image(path):
+    image = Image.open(path).convert("RGB")
+    transform = build_transform(IMAGE_SIZE)
+    tiles = dynamic_preprocess(image, IMAGE_SIZE, MAX_TILES)
+    pixel_values = torch.stack([transform(t) for t in tiles])
+    return pixel_values
+
+def load_annotations(csv_path):
+    grouped = {}
+    with open(csv_path, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            img = r["image_name"]
+            box = [
+                float(r["x1"]) / float(r["screen_width"]),
+                float(r["y1"]) / float(r["screen_height"]),
+                float(r["x2"]) / float(r["screen_width"]),
+                float(r["y2"]) / float(r["screen_height"]),
+            ]
+            grouped.setdefault(img, []).append(box)
+    return grouped
+
+
 class EditTextDataset(Dataset):
-    def __init__(self, samples, image_root):
-        self.samples = samples
+    def __init__(self, grouped, image_root):
+        self.samples = []
+        for img, boxes in grouped.items():
+            self.samples.append((img, boxes))
         self.image_root = image_root
-
-    def __getitem__(self, idx):
-        s = self.samples[idx]
-        pixel_values = load_image(
-            os.path.join(self.image_root, s["image"])
-        ).to(torch.bfloat16)
-
-        prompt = "<image>\nDetect all edit text boxes."
-        target = "\n".join([str(b) for b in s["boxes"]])
-
-        return pixel_values, prompt, target
 
     def __len__(self):
         return len(self.samples)
 
+    def __getitem__(self, idx):
+        img, boxes = self.samples[idx]
+
+        pixel_values = load_image(
+            os.path.join(self.image_root, img)
+        ).to(torch.bfloat16)
+
+        prompt = "<image>\nDetect all edit text boxes and output normalized bounding boxes."
+
+        target = "\n".join(
+            [f"[{b[0]:.4f}, {b[1]:.4f}, {b[2]:.4f}, {b[3]:.4f}]" for b in boxes]
+        )
+
+        return pixel_values, prompt, target
+
+model = AutoModel.from_pretrained(
+    MODEL_PATH,
+    trust_remote_code=True,
+    torch_dtype=torch.bfloat16,
+    low_cpu_mem_usage=True
+).cuda()
+
+tokenizer = AutoTokenizer.from_pretrained(
+    MODEL_PATH,
+    trust_remote_code=True,
+    use_fast=False
+)
 
 model.train()
 
-for pixel_values, prompt, target in loader:
-    pixel_values = pixel_values[0].cuda()  # batch_size=1
+dataset = EditTextDataset(load_annotations(CSV_PATH), IMAGE_ROOT)
 
-    # InternVL handles image tokens internally
-    response = model.chat(
-        tokenizer,
-        pixel_values,
-        prompt,
-        generation_config=dict(max_new_tokens=256),
-        history=None
-    )
+loader = DataLoader(
+    dataset,
+    batch_size=1,
+    shuffle=True
+)
 
-    # Language loss only (instruction tuning)
-    loss = model.compute_loss(response, target)
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
 
-    loss.backward()
-    optimizer.step()
-    optimizer.zero_grad()
+for epoch in range(1):
+    for step, (pixel_values, prompt, target) in enumerate(loader):
+        pixel_values = pixel_values[0].cuda()
+
+        # Forward via chat (THIS IS THE ONLY SAFE PATH)
+        response = model.chat(
+            tokenizer,
+            pixel_values,
+            prompt,
+            generation_config=dict(max_new_tokens=256),
+            history=None
+        )
+
+        # Language-only teacher forcing loss
+        text = prompt.replace("<image>", "") + "\n" + target
+        tokens = tokenizer(text, return_tensors="pt").to("cuda")
+
+        outputs = model.language_model(
+            input_ids=tokens.input_ids,
+            labels=tokens.input_ids
+        )
+
+        loss = outputs.loss
+        loss.backward()
+
+        optimizer.step()
+        optimizer.zero_grad()
+
+        print(f"Step {step} | Loss {loss.item():.4f}")
 
 
