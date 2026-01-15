@@ -1,39 +1,42 @@
-def collate_fn(batch, tokenizer):
-    assert len(batch) == 1, "InternVL requires batch_size=1"
+class EditTextDataset(Dataset):
+    def __init__(self, samples, image_root):
+        self.samples = samples
+        self.image_root = image_root
 
-    item = batch[0]
+    def __getitem__(self, idx):
+        s = self.samples[idx]
+        pixel_values = load_image(
+            os.path.join(self.image_root, s["image"])
+        ).to(torch.bfloat16)
 
-    # Prepare text (remove <image> marker)
-    text = item["prompt"].replace("<image>", "").strip()
-    target = item["target"]
-    full_text = text + "\n" + target
+        prompt = "<image>\nDetect all edit text boxes."
+        target = "\n".join([str(b) for b in s["boxes"]])
 
-    tokens = tokenizer(
-        full_text,
-        return_tensors="pt",
-        add_special_tokens=True
+        return pixel_values, prompt, target
+
+    def __len__(self):
+        return len(self.samples)
+
+
+model.train()
+
+for pixel_values, prompt, target in loader:
+    pixel_values = pixel_values[0].cuda()  # batch_size=1
+
+    # InternVL handles image tokens internally
+    response = model.chat(
+        tokenizer,
+        pixel_values,
+        prompt,
+        generation_config=dict(max_new_tokens=256),
+        history=None
     )
 
-    input_ids = tokens.input_ids          # [1, L]
-    attention_mask = tokens.attention_mask
+    # Language loss only (instruction tuning)
+    loss = model.compute_loss(response, target)
 
-    pixel_values = item["pixel_values"]   # [N, 3, 448, 448]
-    num_image_tokens = pixel_values.shape[0]
-
-    # ✅ THIS IS THE KEY
-    image_flags = torch.ones(
-        (num_image_tokens,),
-        dtype=torch.bool
-    )
-
-    return {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "pixel_values": pixel_values,
-        "image_flags": image_flags
-    }
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
 
 
-assert batch["image_flags"].dim() == 1
-assert batch["image_flags"].dtype == torch.bool
-assert batch["image_flags"].shape[0] == batch["pixel_values"].shape[0]
