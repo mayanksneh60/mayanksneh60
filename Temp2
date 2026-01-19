@@ -1,3 +1,13 @@
+path: yolo_dataset
+train: images/train
+val: images/val
+
+nc: 1
+names:
+  - TEXT_INPUT
+
+
+
 import csv
 import os
 import shutil
