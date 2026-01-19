@@ -1,50 +1,37 @@
-import json
 import csv
+import os
+import shutil
 
-# paths
-json_path = "rico_annotations.json"
 csv_path = "yolo_text_input.csv"
+source_dir = "images_all"
+dest_dir = "images_text_input"
 
-CLASS_MAPPING = {
-    "TEXT_INPUT": 0
-}
+# create destination folder if not exists
+os.makedirs(dest_dir, exist_ok=True)
 
-rows = []
+image_names = set()
 
-with open(json_path, "r", encoding="utf-8") as f:
-    data = json.load(f)
+# read csv and collect unique image names
+with open(csv_path, "r", encoding="utf-8") as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        image_names.add(row["image_name"])
 
-for screen in data:
-    screen_id = screen["screen_id"]
-    image_name = f"{screen_id}.jpg"   # change extension if needed
+copied = 0
+missing = 0
 
-    for elem in screen.get("screen_elements", []):
-        if elem.get("label") != "TEXT_INPUT":
-            continue
+for image_name in image_names:
+    src_path = os.path.join(source_dir, image_name)
+    dst_path = os.path.join(dest_dir, image_name)
 
-        xmin = elem["xmin"]
-        ymin = elem["ymin"]
-        xmax = elem["xmax"]
-        ymax = elem["ymax"]
+    if not os.path.exists(src_path):
+        print(f"Missing: {src_path}")
+        missing += 1
+        continue
 
-        x_center = (xmin + xmax) / 2.0
-        y_center = (ymin + ymax) / 2.0
-        width = xmax - xmin
-        height = ymax - ymin
+    shutil.copy2(src_path, dst_path)
+    copied += 1
 
-        rows.append([
-            image_name,
-            CLASS_MAPPING["TEXT_INPUT"],
-            x_center,
-            y_center,
-            width,
-            height
-        ])
-
-# write csv
-with open(csv_path, "w", newline="", encoding="utf-8") as f:
-    writer = csv.writer(f)
-    writer.writerow(["image_name", "class_id", "x_center", "y_center", "width", "height"])
-    writer.writerows(rows)
-
-print(f"Saved {len(rows)} TEXT_INPUT boxes to {csv_path}")
+print(f"\nDone.")
+print(f"Images copied   : {copied}")
+print(f"Images missing  : {missing}")
