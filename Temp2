@@ -1,168 +1,50 @@
-import os
+import json
 import csv
-import torch
-import torchvision.transforms as T
-from torch.utils.data import Dataset, DataLoader
-from PIL import Image
-from transformers import AutoModel, AutoTokenizer
-from torchvision.transforms.functional import InterpolationMode
-MODEL_PATH = "./InternVL3-78B"   # offline path
-IMAGE_ROOT = "./images"
-CSV_PATH = "./annotations.csv"
 
-IMAGE_SIZE = 448
-MAX_TILES = 12
+# paths
+json_path = "rico_annotations.json"
+csv_path = "yolo_text_input.csv"
 
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
-def build_transform(input_size):
-    return T.Compose([
-        T.Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
-        T.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
-        T.ToTensor(),
-        T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-    ])
-def dynamic_preprocess(image, image_size=448, max_num=12):
-    w, h = image.size
-    aspect_ratio = w / h
+CLASS_MAPPING = {
+    "TEXT_INPUT": 0
+}
 
-    ratios = sorted(
-        {(i, j)
-         for n in range(1, max_num + 1)
-         for i in range(1, n + 1)
-         for j in range(1, n + 1)
-         if i * j <= max_num},
-        key=lambda x: x[0] * x[1]
-    )
+rows = []
 
-    best = ratios[0]
-    best_diff = 1e9
-    for r in ratios:
-        diff = abs(aspect_ratio - r[0] / r[1])
-        if diff < best_diff:
-            best = r
-            best_diff = diff
+with open(json_path, "r", encoding="utf-8") as f:
+    data = json.load(f)
 
-    tw, th = best[0] * image_size, best[1] * image_size
-    resized = image.resize((tw, th))
+for screen in data:
+    screen_id = screen["screen_id"]
+    image_name = f"{screen_id}.jpg"   # change extension if needed
 
-    tiles = []
-    for i in range(best[0] * best[1]):
-        box = (
-            (i % best[0]) * image_size,
-            (i // best[0]) * image_size,
-            ((i % best[0]) + 1) * image_size,
-            ((i // best[0]) + 1) * image_size,
-        )
-        tiles.append(resized.crop(box))
+    for elem in screen.get("screen_elements", []):
+        if elem.get("label") != "TEXT_INPUT":
+            continue
 
-    if len(tiles) > 1:
-        tiles.append(image.resize((image_size, image_size)))
+        xmin = elem["xmin"]
+        ymin = elem["ymin"]
+        xmax = elem["xmax"]
+        ymax = elem["ymax"]
 
-    return tiles
+        x_center = (xmin + xmax) / 2.0
+        y_center = (ymin + ymax) / 2.0
+        width = xmax - xmin
+        height = ymax - ymin
 
+        rows.append([
+            image_name,
+            CLASS_MAPPING["TEXT_INPUT"],
+            x_center,
+            y_center,
+            width,
+            height
+        ])
 
-def load_image(path):
-    image = Image.open(path).convert("RGB")
-    transform = build_transform(IMAGE_SIZE)
-    tiles = dynamic_preprocess(image, IMAGE_SIZE, MAX_TILES)
-    pixel_values = torch.stack([transform(t) for t in tiles])
-    return pixel_values
+# write csv
+with open(csv_path, "w", newline="", encoding="utf-8") as f:
+    writer = csv.writer(f)
+    writer.writerow(["image_name", "class_id", "x_center", "y_center", "width", "height"])
+    writer.writerows(rows)
 
-def load_annotations(csv_path):
-    grouped = {}
-    with open(csv_path, encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for r in reader:
-            img = r["image_name"]
-            box = [
-                float(r["x1"]) / float(r["screen_width"]),
-                float(r["y1"]) / float(r["screen_height"]),
-                float(r["x2"]) / float(r["screen_width"]),
-                float(r["y2"]) / float(r["screen_height"]),
-            ]
-            grouped.setdefault(img, []).append(box)
-    return grouped
-
-
-class EditTextDataset(Dataset):
-    def __init__(self, grouped, image_root):
-        self.samples = []
-        for img, boxes in grouped.items():
-            self.samples.append((img, boxes))
-        self.image_root = image_root
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        img, boxes = self.samples[idx]
-
-        pixel_values = load_image(
-            os.path.join(self.image_root, img)
-        ).to(torch.bfloat16)
-
-        prompt = "<image>\nDetect all edit text boxes and output normalized bounding boxes."
-
-        target = "\n".join(
-            [f"[{b[0]:.4f}, {b[1]:.4f}, {b[2]:.4f}, {b[3]:.4f}]" for b in boxes]
-        )
-
-        return pixel_values, prompt, target
-
-model = AutoModel.from_pretrained(
-    MODEL_PATH,
-    trust_remote_code=True,
-    torch_dtype=torch.bfloat16,
-    low_cpu_mem_usage=True
-).cuda()
-
-tokenizer = AutoTokenizer.from_pretrained(
-    MODEL_PATH,
-    trust_remote_code=True,
-    use_fast=False
-)
-
-model.train()
-
-dataset = EditTextDataset(load_annotations(CSV_PATH), IMAGE_ROOT)
-
-loader = DataLoader(
-    dataset,
-    batch_size=1,
-    shuffle=True
-)
-
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
-
-for epoch in range(1):
-    for step, (pixel_values, prompt, target) in enumerate(loader):
-        pixel_values = pixel_values[0].cuda()
-
-        # Forward via chat (THIS IS THE ONLY SAFE PATH)
-        response = model.chat(
-            tokenizer,
-            pixel_values,
-            prompt,
-            generation_config=dict(max_new_tokens=256),
-            history=None
-        )
-
-        # Language-only teacher forcing loss
-        text = prompt.replace("<image>", "") + "\n" + target
-        tokens = tokenizer(text, return_tensors="pt").to("cuda")
-
-        outputs = model.language_model(
-            input_ids=tokens.input_ids,
-            labels=tokens.input_ids
-        )
-
-        loss = outputs.loss
-        loss.backward()
-
-        optimizer.step()
-        optimizer.zero_grad()
-
-        print(f"Step {step} | Loss {loss.item():.4f}")
-
-
+print(f"Saved {len(rows)} TEXT_INPUT boxes to {csv_path}")
