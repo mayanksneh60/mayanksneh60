@@ -35,3 +35,64 @@ for image_name in image_names:
 print(f"\nDone.")
 print(f"Images copied   : {copied}")
 print(f"Images missing  : {missing}")
+
+
+
+
+
+
+
+
+
+import csv
+import os
+import shutil
+
+csv_path = "yolo_text_input.csv"
+clean_csv_path = "yolo_text_input_clean.csv"
+
+source_dir = "images_all"
+dest_dir = "images_text_input"
+
+os.makedirs(dest_dir, exist_ok=True)
+
+valid_rows = []
+copied_images = set()
+missing_images = set()
+
+with open(csv_path, "r", encoding="utf-8") as f:
+    reader = csv.DictReader(f)
+    fieldnames = reader.fieldnames
+
+    for row in reader:
+        image_name = row["image_name"]
+        src_path = os.path.join(source_dir, image_name)
+
+        if not os.path.exists(src_path):
+            missing_images.add(image_name)
+            continue
+
+        # keep valid row
+        valid_rows.append(row)
+
+        # copy image only once
+        if image_name not in copied_images:
+            shutil.copy2(src_path, os.path.join(dest_dir, image_name))
+            copied_images.add(image_name)
+
+# write cleaned csv
+with open(clean_csv_path, "w", newline="", encoding="utf-8") as f:
+    writer = csv.DictWriter(f, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(valid_rows)
+
+print("Finished cleaning dataset\n")
+print(f"Valid annotations kept : {len(valid_rows)}")
+print(f"Images copied          : {len(copied_images)}")
+print(f"Missing images dropped : {len(missing_images)}")
+
+if missing_images:
+    print("\nSample missing images:")
+    for img in list(missing_images)[:10]:
+        print(" -", img)
+
