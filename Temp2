@@ -1,24 +1,107 @@
+import cv2
+import pandas as pd
+import os
+
+# ---------------- CONFIG ----------------
+CSV_PATH = "annotations.csv"
+IMAGE_DIR = "images"
+START_ROW = 0          # change to resume
+SAVE_EVERY = 50
+WINDOW_NAME = "EditText Annotator"
+MAX_W = 720
+MAX_H = 1280
+# ----------------------------------------
+
+df = pd.read_csv(CSV_PATH)
+
+def yolo_to_xyxy(xc, yc, w, h, img_w, img_h):
+    x1 = int((xc - w / 2) * img_w)
+    y1 = int((yc - h / 2) * img_h)
+    x2 = int((xc + w / 2) * img_w)
+    y2 = int((yc + h / 2) * img_h)
+    return x1, y1, x2, y2
+
+
 def resize_keep_aspect(img, max_w=720, max_h=1280):
     h, w = img.shape[:2]
 
     scale = min(max_w / w, max_h / h, 1.0)  # never upscale
+
+    if scale == 1.0:
+        return img
+
     new_w = int(w * scale)
     new_h = int(h * scale)
 
-    if scale < 1.0:
-        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-
-    return img
+    # Sharp resize for UI screenshots
+    return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
 
-# draw bounding box
-display = img.copy()
-cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
+cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 
-label_text = f"Row: {idx} | f = focused (1) | n = non-focused (0) | ESC = quit"
-cv2.putText(display, label_text, (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+for idx in range(START_ROW, len(df)):
+    row = df.iloc[idx]
+    image_path = os.path.join(IMAGE_DIR, row["image_name"])
 
-# resize only for display
-display_resized = resize_keep_aspect(display, max_w=720, max_h=1280)
-cv2.imshow(WINDOW_NAME, display_resized)
+    if not os.path.exists(image_path):
+        print(f"[WARN] Image not found: {image_path}")
+        continue
+
+    img = cv2.imread(image_path)
+    if img is None:
+        print(f"[WARN] Failed to load image: {image_path}")
+        continue
+
+    h_img, w_img = img.shape[:2]
+
+    x1, y1, x2, y2 = yolo_to_xyxy(
+        row["x_center"], row["y_center"],
+        row["width"], row["height"],
+        w_img, h_img
+    )
+
+    # draw bounding box
+    display = img.copy()
+    cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+    label_text = (
+        f"Row: {idx} | f = focused (1) | n = non-focused (0) | ESC = quit"
+    )
+    cv2.putText(
+        display, label_text, (10, 30),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
+    )
+
+    # resize only once, sharply
+    display_resized = resize_keep_aspect(display, MAX_W, MAX_H)
+    cv2.imshow(WINDOW_NAME, display_resized)
+
+    while True:
+        key = cv2.waitKey(0) & 0xFF
+
+        # ESC → save & exit
+        if key == 27:
+            print(f"[INFO] Stopped at row {idx}")
+            df.to_csv(CSV_PATH, index=False)
+            cv2.destroyAllWindows()
+            exit(0)
+
+        # focused
+        elif key == ord('f'):
+            df.at[idx, "class_id"] = 1
+            break
+
+        # non-focused
+        elif key == ord('n'):
+            df.at[idx, "class_id"] = 0
+            break
+
+    # periodic save
+    if idx % SAVE_EVERY == 0 and idx != START_ROW:
+        df.to_csv(CSV_PATH, index=False)
+        print(f"[INFO] Saved progress at row {idx}")
+
+# final save
+df.to_csv(CSV_PATH, index=False)
+cv2.destroyAllWindows()
+print("[DONE] Annotation completed.")
