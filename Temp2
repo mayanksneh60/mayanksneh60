@@ -5,7 +5,7 @@ import os
 # ---------------- CONFIG ----------------
 CSV_PATH = "annotations.csv"
 IMAGE_DIR = "images"
-START_ROW = 0          # change to resume
+START_ROW = 0          # resume from here
 SAVE_EVERY = 50
 WINDOW_NAME = "EditText Annotator"
 MAX_W = 720
@@ -24,8 +24,7 @@ def yolo_to_xyxy(xc, yc, w, h, img_w, img_h):
 
 def resize_keep_aspect(img, max_w=720, max_h=1280):
     h, w = img.shape[:2]
-
-    scale = min(max_w / w, max_h / h, 1.0)  # never upscale
+    scale = min(max_w / w, max_h / h, 1.0)
 
     if scale == 1.0:
         return img
@@ -33,23 +32,27 @@ def resize_keep_aspect(img, max_w=720, max_h=1280):
     new_w = int(w * scale)
     new_h = int(h * scale)
 
-    # Sharp resize for UI screenshots
     return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
 
 cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 
-for idx in range(START_ROW, len(df)):
+idx = START_ROW
+history = []   # stack for back navigation
+exit_requested = False
+
+while 0 <= idx < len(df):
+
     row = df.iloc[idx]
     image_path = os.path.join(IMAGE_DIR, row["image_name"])
 
     if not os.path.exists(image_path):
-        print(f"[WARN] Image not found: {image_path}")
+        idx += 1
         continue
 
     img = cv2.imread(image_path)
     if img is None:
-        print(f"[WARN] Failed to load image: {image_path}")
+        idx += 1
         continue
 
     h_img, w_img = img.shape[:2]
@@ -60,48 +63,63 @@ for idx in range(START_ROW, len(df)):
         w_img, h_img
     )
 
-    # draw bounding box
     display = img.copy()
     cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
     label_text = (
-        f"Row: {idx} | f = focused (1) | n = non-focused (0) | ESC = quit"
+        f"Row: {idx} | f=1 focused | n=0 non | u=2 undef | b=back | ESC=quit"
     )
     cv2.putText(
         display, label_text, (10, 30),
         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
     )
 
-    # resize only once, sharply
     display_resized = resize_keep_aspect(display, MAX_W, MAX_H)
     cv2.imshow(WINDOW_NAME, display_resized)
 
-    while True:
-        key = cv2.waitKey(0) & 0xFF
+    key = cv2.waitKey(0) & 0xFF
 
-        # ESC → save & exit
-        if key == 27:
-            print(f"[INFO] Stopped at row {idx}")
-            df.to_csv(CSV_PATH, index=False)
-            cv2.destroyAllWindows()
-            exit(0)
+    # ---------- KEY HANDLING ----------
 
-        # focused
-        elif key == ord('f'):
-            df.at[idx, "class_id"] = 1
-            break
+    if key == 27:  # ESC
+        print(f"[INFO] Exit requested at row {idx}")
+        exit_requested = True
 
-        # non-focused
-        elif key == ord('n'):
-            df.at[idx, "class_id"] = 0
-            break
+    elif key == ord('b'):  # go back
+        if history:
+            idx = history.pop()
+            continue
+        else:
+            print("[INFO] No previous record")
+            continue
+
+    elif key == ord('f'):
+        history.append(idx)
+        df.at[idx, "class_id"] = 1
+        idx += 1
+
+    elif key == ord('n'):
+        history.append(idx)
+        df.at[idx, "class_id"] = 0
+        idx += 1
+
+    elif key == ord('u'):
+        history.append(idx)
+        df.at[idx, "class_id"] = 2
+        idx += 1
+
+    else:
+        continue
 
     # periodic save
-    if idx % SAVE_EVERY == 0 and idx != START_ROW:
+    if idx % SAVE_EVERY == 0:
         df.to_csv(CSV_PATH, index=False)
         print(f"[INFO] Saved progress at row {idx}")
 
-# final save
+    if exit_requested:
+        break
+
+# -------- CLEAN EXIT (NO CRASH) --------
 df.to_csv(CSV_PATH, index=False)
 cv2.destroyAllWindows()
-print("[DONE] Annotation completed.")
+print("[DONE] CSV saved safely. Exiting.")
