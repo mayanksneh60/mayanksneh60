@@ -1,78 +1,24 @@
-import cv2
-import pandas as pd
-import os
+def resize_keep_aspect(img, max_w=720, max_h=1280):
+    h, w = img.shape[:2]
 
-# ---------------- CONFIG ----------------
-CSV_PATH = "annotations.csv"
-IMAGE_DIR = "images"
-START_ROW = 0            # resume index
-PAD = 20                 # padding around bbox (pixels)
-DISPLAY_SIZE = 400       # fixed display size
-SKIP_LABELED = True      # skip rows already labeled
-# ----------------------------------------
+    scale = min(max_w / w, max_h / h, 1.0)  # never upscale
+    new_w = int(w * scale)
+    new_h = int(h * scale)
 
-df = pd.read_csv(CSV_PATH)
+    if scale < 1.0:
+        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-image_cache = {}
-cv2.namedWindow("Annotator", cv2.WINDOW_NORMAL)
+    return img
 
-def yolo_to_xyxy(xc, yc, w, h, img_w, img_h):
-    x1 = int((xc - w / 2) * img_w)
-    y1 = int((yc - h / 2) * img_h)
-    x2 = int((xc + w / 2) * img_w)
-    y2 = int((yc + h / 2) * img_h)
-    return x1, y1, x2, y2
 
-for idx in range(START_ROW, len(df)):
+# draw bounding box
+display = img.copy()
+cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-    # Skip already processed rows
-    if SKIP_LABELED and df.at[idx, "class_id"] in [0, 1]:
-        continue
+label_text = f"Row: {idx} | f = focused (1) | n = non-focused (0) | ESC = quit"
+cv2.putText(display, label_text, (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-    row = df.iloc[idx]
-    img_path = os.path.join(IMAGE_DIR, row["image_name"])
-
-    if not os.path.exists(img_path):
-        continue
-
-    # cache image
-    if row["image_name"] not in image_cache:
-        image_cache[row["image_name"]] = cv2.imread(img_path)
-
-    img = image_cache[row["image_name"]]
-    h_img, w_img = img.shape[:2]
-
-    x1, y1, x2, y2 = yolo_to_xyxy(
-        row["x_center"], row["y_center"],
-        row["width"], row["height"],
-        w_img, h_img
-    )
-
-    # add padding and clip
-    x1 = max(0, x1 - PAD)
-    y1 = max(0, y1 - PAD)
-    x2 = min(w_img, x2 + PAD)
-    y2 = min(h_img, y2 + PAD)
-
-    crop = img[y1:y2, x1:x2]
-
-    if crop.size == 0:
-        continue
-
-    crop = cv2.resize(crop, (DISPLAY_SIZE, DISPLAY_SIZE))
-    cv2.imshow("Annotator", crop)
-
-    key = cv2.waitKey(0) & 0xFF
-
-    if key == 27:  # ESC
-        print(f"[INFO] Saving and exiting at row {idx}")
-        break
-    elif key == ord('f'):
-        df.at[idx, "class_id"] = 1
-    elif key == ord('n'):
-        df.at[idx, "class_id"] = 0
-
-# save once
-df.to_csv(CSV_PATH, index=False)
-cv2.destroyAllWindows()
-print("[DONE] Progress saved.")
+# resize only for display
+display_resized = resize_keep_aspect(display, max_w=720, max_h=1280)
+cv2.imshow(WINDOW_NAME, display_resized)
