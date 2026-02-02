@@ -1,125 +1,57 @@
-import cv2
-import pandas as pd
-import os
+Bootstrap: docker
+From: nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
-# ---------------- CONFIG ----------------
-CSV_PATH = "annotations.csv"
-IMAGE_DIR = "images"
-START_ROW = 0          # resume from here
-SAVE_EVERY = 50
-WINDOW_NAME = "EditText Annotator"
-MAX_W = 720
-MAX_H = 1280
-# ----------------------------------------
+%labels
+    Author YourName
+    Description YOLO Training Environment (Ultralytics)
+    Version v1.0
 
-df = pd.read_csv(CSV_PATH)
+%environment
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+    export PYTHONUNBUFFERED=1
 
-def yolo_to_xyxy(xc, yc, w, h, img_w, img_h):
-    x1 = int((xc - w / 2) * img_w)
-    y1 = int((yc - h / 2) * img_h)
-    x2 = int((xc + w / 2) * img_w)
-    y2 = int((yc + h / 2) * img_h)
-    return x1, y1, x2, y2
+%post
+    echo "=== System setup ==="
+    apt-get update && apt-get install -y \
+        python3 \
+        python3-pip \
+        python3-dev \
+        git \
+        wget \
+        curl \
+        ca-certificates \
+        libgl1 \
+        libglib2.0-0 \
+        && rm -rf /var/lib/apt/lists/*
 
+    echo "=== Python setup ==="
+    python3 -m pip install --upgrade pip setuptools wheel
 
-def resize_keep_aspect(img, max_w=720, max_h=1280):
-    h, w = img.shape[:2]
-    scale = min(max_w / w, max_h / h, 1.0)
+    echo "=== Install PyTorch (CUDA) ==="
+    pip install torch torchvision torchaudio \
+        --index-url https://download.pytorch.org/whl/cu121
 
-    if scale == 1.0:
-        return img
+    echo "=== Install YOLO + deps ==="
+    pip install ultralytics \
+        opencv-python-headless \
+        matplotlib \
+        numpy \
+        pandas \
+        tqdm \
+        pyyaml \
+        seaborn
 
-    new_w = int(w * scale)
-    new_h = int(h * scale)
+    echo "=== Verify installs ==="
+    python3 - <<EOF
+import torch, cv2
+print("Torch:", torch.__version__)
+print("CUDA available:", torch.cuda.is_available())
+print("OpenCV:", cv2.__version__)
+EOF
 
-    return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-
-
-cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-
-idx = START_ROW
-history = []   # stack for back navigation
-exit_requested = False
-
-while 0 <= idx < len(df):
-
-    row = df.iloc[idx]
-    image_path = os.path.join(IMAGE_DIR, row["image_name"])
-
-    if not os.path.exists(image_path):
-        idx += 1
-        continue
-
-    img = cv2.imread(image_path)
-    if img is None:
-        idx += 1
-        continue
-
-    h_img, w_img = img.shape[:2]
-
-    x1, y1, x2, y2 = yolo_to_xyxy(
-        row["x_center"], row["y_center"],
-        row["width"], row["height"],
-        w_img, h_img
-    )
-
-    display = img.copy()
-    cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-    label_text = (
-        f"Row: {idx} | f=1 focused | n=0 non | u=2 undef | b=back | ESC=quit"
-    )
-    cv2.putText(
-        display, label_text, (10, 30),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
-    )
-
-    display_resized = resize_keep_aspect(display, MAX_W, MAX_H)
-    cv2.imshow(WINDOW_NAME, display_resized)
-
-    key = cv2.waitKey(0) & 0xFF
-
-    # ---------- KEY HANDLING ----------
-
-    if key == 27:  # ESC
-        print(f"[INFO] Exit requested at row {idx}")
-        exit_requested = True
-
-    elif key == ord('b'):  # go back
-        if history:
-            idx = history.pop()
-            continue
-        else:
-            print("[INFO] No previous record")
-            continue
-
-    elif key == ord('f'):
-        history.append(idx)
-        df.at[idx, "class_id"] = 1
-        idx += 1
-
-    elif key == ord('n'):
-        history.append(idx)
-        df.at[idx, "class_id"] = 0
-        idx += 1
-
-    elif key == ord('u'):
-        history.append(idx)
-        df.at[idx, "class_id"] = 2
-        idx += 1
-
-    else:
-        continue
-
-    # periodic save
-    if idx % SAVE_EVERY == 0:
-        df.to_csv(CSV_PATH, index=False)
-        print(f"[INFO] Saved progress at row {idx}")
-
-    if exit_requested:
-        break
-
-# -------- CLEAN EXIT (NO CRASH) --------
-df.to_csv(CSV_PATH, index=False)
-cv2.destroyAllWindows()
-print("[DONE] CSV saved safely. Exiting.")
+%runscript
+    echo "YOLO container is ready."
+    echo "Run commands like:"
+    echo "  yolo train model=yolov8n.pt data=data.yaml epochs=100"
+    exec "$@"
