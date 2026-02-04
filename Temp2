@@ -1,3 +1,15 @@
+init {
+        // 🔍 DEBUG: print output tensor shapes (run once)
+        for (i in 0 until interpreter.outputTensorCount) {
+            Log.d(
+                "YOLO",
+                "Output $i shape=${interpreter.getOutputTensor(i).shape().contentToString()}"
+            )
+      }
+}
+
+
+
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import java.io.FileInputStream
