@@ -1,34 +1,182 @@
-init {
-        // 🔍 DEBUG: print output tensor shapes (run once)
+package com.yourpackage.yolo
+
+import android.content.Context
+import android.graphics.*
+import android.util.Log
+import org.tensorflow.lite.Interpreter
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlin.math.max
+import kotlin.math.min
+
+data class Detection(
+    val classId: Int,
+    val score: Float,
+    val box: RectF
+)
+
+class YoloTFLite(
+    context: Context,
+    modelName: String = "yolov9c.tflite",
+    private val inputSize: Int = 640
+) {
+
+    private val interpreter: Interpreter
+
+    init {
+        val model = loadModelFile(context, modelName)
+        interpreter = Interpreter(model)
+        logOutputShapes()
+    }
+
+    /** -------- PUBLIC INFERENCE API -------- */
+    fun detect(bitmap: Bitmap): List<Detection> {
+
+        val origW = bitmap.width
+        val origH = bitmap.height
+
+        val resized = letterbox(bitmap)
+        val inputBuffer = bitmapToBuffer(resized.bitmap)
+
+        val output = Array(1) { Array(6) { FloatArray(8400) } }
+
+        interpreter.run(inputBuffer, output)
+
+        return parseOutput(
+            output,
+            origW,
+            origH,
+            resized.scale,
+            resized.padX,
+            resized.padY
+        )
+    }
+
+    /** -------- OUTPUT PARSING (YOLOv9-C) -------- */
+    private fun parseOutput(
+        output: Array<Array<FloatArray>>,
+        origW: Int,
+        origH: Int,
+        scale: Float,
+        padX: Float,
+        padY: Float
+    ): List<Detection> {
+
+        val detections = mutableListOf<Detection>()
+
+        for (i in 0 until 8400) {
+
+            val score = output[0][4][i]
+            if (score < 0.25f) continue
+
+            val cx = output[0][0][i] * inputSize
+            val cy = output[0][1][i] * inputSize
+            val w  = output[0][2][i] * inputSize
+            val h  = output[0][3][i] * inputSize
+
+            val classId = output[0][5][i].toInt()
+
+            val x1 = (cx - w / 2f - padX) / scale
+            val y1 = (cy - h / 2f - padY) / scale
+            val x2 = (cx + w / 2f - padX) / scale
+            val y2 = (cy + h / 2f - padY) / scale
+
+            val rect = RectF(
+                max(0f, x1),
+                max(0f, y1),
+                min(origW.toFloat(), x2),
+                min(origH.toFloat(), y2)
+            )
+
+            detections.add(
+                Detection(classId, score, rect)
+            )
+        }
+
+        return detections
+    }
+
+    /** -------- LETTERBOX RESIZE -------- */
+    private data class LetterboxResult(
+        val bitmap: Bitmap,
+        val scale: Float,
+        val padX: Float,
+        val padY: Float
+    )
+
+    private fun letterbox(src: Bitmap): LetterboxResult {
+        val scale = min(
+            inputSize / src.width.toFloat(),
+            inputSize / src.height.toFloat()
+        )
+
+        val newW = (src.width * scale).toInt()
+        val newH = (src.height * scale).toInt()
+
+        val resized = Bitmap.createScaledBitmap(src, newW, newH, true)
+
+        val output = Bitmap.createBitmap(
+            inputSize,
+            inputSize,
+            Bitmap.Config.ARGB_8888
+        )
+
+        val canvas = Canvas(output)
+        canvas.drawColor(Color.BLACK)
+
+        val padX = (inputSize - newW) / 2f
+        val padY = (inputSize - newH) / 2f
+
+        canvas.drawBitmap(resized, padX, padY, null)
+
+        return LetterboxResult(output, scale, padX, padY)
+    }
+
+    /** -------- BITMAP → FLOAT BUFFER -------- */
+    private fun bitmapToBuffer(bitmap: Bitmap): ByteBuffer {
+
+        val buffer =
+            ByteBuffer.allocateDirect(1 * inputSize * inputSize * 3 * 4)
+        buffer.order(ByteOrder.nativeOrder())
+
+        val pixels = IntArray(inputSize * inputSize)
+        bitmap.getPixels(
+            pixels,
+            0,
+            inputSize,
+            0,
+            0,
+            inputSize,
+            inputSize
+        )
+
+        for (pixel in pixels) {
+            buffer.putFloat(((pixel shr 16) and 0xFF) / 255f)
+            buffer.putFloat(((pixel shr 8) and 0xFF) / 255f)
+            buffer.putFloat((pixel and 0xFF) / 255f)
+        }
+
+        buffer.rewind()
+        return buffer
+    }
+
+    /** -------- MODEL LOADER -------- */
+    private fun loadModelFile(context: Context, name: String): ByteBuffer {
+        val bytes = context.assets.open(name).readBytes()
+        return ByteBuffer
+            .allocateDirect(bytes.size)
+            .order(ByteOrder.nativeOrder())
+            .put(bytes)
+            .apply { rewind() }
+    }
+
+    /** -------- DEBUG -------- */
+    private fun logOutputShapes() {
         for (i in 0 until interpreter.outputTensorCount) {
             Log.d(
                 "YOLO",
                 "Output $i shape=${interpreter.getOutputTensor(i).shape().contentToString()}"
             )
-      }
+        }
+    }
 }
-
-
-
-import java.nio.MappedByteBuffer
-import java.nio.channels.FileChannel
-import java.io.FileInputStream
-
-private fun loadModelFile(context: Context, modelName: String): MappedByteBuffer {
-    val fileDescriptor = context.assets.openFd(modelName)
-    val inputStream = FileInputStream(fileDescriptor.fileDescriptor)
-    val fileChannel = inputStream.channel
-    val startOffset = fileDescriptor.startOffset
-    val declaredLength = fileDescriptor.declaredLength
-    return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
-}
-
-
-class YoloTFLite(
-    context: Context,
-    modelName: String = "yolov9c.tflite",
-    ...
-) {
-
-    private val interpreter: Interpreter =
-        Interpreter(loadModelFile(context, modelName))
