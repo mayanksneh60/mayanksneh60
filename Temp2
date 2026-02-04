@@ -1,54 +1,208 @@
-Bootstrap: docker
-From: nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu20.04
+dependencies {
+    implementation 'org.tensorflow:tensorflow-lite:2.14.0'
+    implementation 'org.tensorflow:tensorflow-lite-support:0.4.4'
+}
 
-%labels
-    Author YOLO
-    Description Ultralytics YOLO Training Container
-    Version 1.0
 
-%environment
-    export LC_ALL=C.UTF-8
-    export LANG=C.UTF-8
-    export PYTHONUNBUFFERED=1
-    export MPLBACKEND=Agg
 
-%post
-    echo "==== System dependencies ===="
-    apt-get update && apt-get install -y \
-        python3 \
-        python3-pip \
-        python3-dev \
-        git \
-        wget \
-        curl \
-        ca-certificates \
-        libglib2.0-0 \
-        && rm -rf /var/lib/apt/lists/*
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 
-    echo "==== Python setup ===="
-    python3 -m pip install --upgrade pip setuptools wheel
+data class LetterboxResult(
+    val bitmap: Bitmap,
+    val scale: Float,
+    val padX: Float,
+    val padY: Float
+)
 
-    echo "==== Install PyTorch (CUDA 11.8) ===="
-    pip install torch torchvision torchaudio \
-        --index-url https://download.pytorch.org/whl/cu118
+fun letterbox(
+    src: Bitmap,
+    dstSize: Int = 640
+): LetterboxResult {
 
-    echo "==== Install Ultralytics YOLO ===="
-    pip install ultralytics \
-        opencv-python-headless \
-        numpy \
-        pandas \
-        tqdm \
-        pyyaml \
-        matplotlib
+    val srcW = src.width
+    val srcH = src.height
 
-    echo "==== Sanity check ===="
-    python3 - <<EOF
-import torch, cv2
-print("Torch:", torch.__version__)
-print("CUDA available:", torch.cuda.is_available())
-print("OpenCV:", cv2.__version__)
-EOF
+    val scale = minOf(
+        dstSize.toFloat() / srcW,
+        dstSize.toFloat() / srcH
+    )
 
-%runscript
-    echo "Ultralytics YOLO container ready"
-    exec "$@"
+    val newW = (srcW * scale).toInt()
+    val newH = (srcH * scale).toInt()
+
+    val resized = Bitmap.createScaledBitmap(src, newW, newH, true)
+
+    val output = Bitmap.createBitmap(dstSize, dstSize, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(output)
+    canvas.drawColor(Color.GRAY)
+
+    val padX = (dstSize - newW) / 2f
+    val padY = (dstSize - newH) / 2f
+
+    canvas.drawBitmap(resized, padX, padY, Paint())
+
+    return LetterboxResult(output, scale, padX, padY)
+}
+
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.util.Log
+import org.tensorflow.lite.Interpreter
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+
+data class Detection(
+    val classId: Int,
+    val confidence: Float,
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float
+)
+
+class YoloTFLite(
+    context: Context,
+    modelName: String = "yolo.tflite",
+    private val inputSize: Int = 640,
+    private val numClasses: Int = 80,
+    private val confThreshold: Float = 0.25f
+) {
+
+    private val interpreter: Interpreter =
+        Interpreter(context.assets.open(modelName).readBytes())
+
+    fun infer(original: Bitmap): List<Detection> {
+
+        // 1️⃣ Letterbox
+        val lb = letterbox(original, inputSize)
+
+        // 2️⃣ Preprocess
+        val input = bitmapToBuffer(lb.bitmap)
+
+        // 3️⃣ Output buffer (YOLOv8 style)
+        val output = Array(1) { Array(8400) { FloatArray(5 + numClasses) } }
+
+        interpreter.run(input, output)
+
+        // 4️⃣ Parse + map back to original image
+        return parse(
+            output[0],
+            lb.scale,
+            lb.padX,
+            lb.padY,
+            original.width,
+            original.height
+        )
+    }
+
+    private fun bitmapToBuffer(bitmap: Bitmap): ByteBuffer {
+        val buffer =
+            ByteBuffer.allocateDirect(1 * inputSize * inputSize * 3 * 4)
+        buffer.order(ByteOrder.nativeOrder())
+
+        for (y in 0 until inputSize) {
+            for (x in 0 until inputSize) {
+                val px = bitmap.getPixel(x, y)
+                buffer.putFloat(((px shr 16) and 0xFF) / 255f)
+                buffer.putFloat(((px shr 8) and 0xFF) / 255f)
+                buffer.putFloat((px and 0xFF) / 255f)
+            }
+        }
+        return buffer
+    }
+
+    private fun parse(
+        detections: Array<FloatArray>,
+        scale: Float,
+        padX: Float,
+        padY: Float,
+        origW: Int,
+        origH: Int
+    ): List<Detection> {
+
+        val results = mutableListOf<Detection>()
+
+        for (det in detections) {
+
+            val objConf = det[4]
+            if (objConf < confThreshold) continue
+
+            var classId = -1
+            var maxClassScore = 0f
+
+            for (c in 0 until numClasses) {
+                if (det[5 + c] > maxClassScore) {
+                    maxClassScore = det[5 + c]
+                    classId = c
+                }
+            }
+
+            val confidence = objConf * maxClassScore
+            if (confidence < confThreshold) continue
+
+            // Model outputs normalized coords
+            val cx = det[0] * inputSize
+            val cy = det[1] * inputSize
+            val w = det[2] * inputSize
+            val h = det[3] * inputSize
+
+            // Remove padding & scale back
+            val x1 = (cx - w / 2 - padX) / scale
+            val y1 = (cy - h / 2 - padY) / scale
+            val x2 = (cx + w / 2 - padX) / scale
+            val y2 = (cy + h / 2 - padY) / scale
+
+            // Clamp
+            val left = x1.coerceIn(0f, origW.toFloat())
+            val top = y1.coerceIn(0f, origH.toFloat())
+            val right = x2.coerceIn(0f, origW.toFloat())
+            val bottom = y2.coerceIn(0f, origH.toFloat())
+
+            results.add(
+                Detection(
+                    classId,
+                    confidence,
+                    left,
+                    top,
+                    right,
+                    bottom
+                )
+            )
+
+            Log.d(
+                "YOLO",
+                "Class=$classId Conf=$confidence Box=[$left,$top,$right,$bottom]"
+            )
+        }
+        return results
+    }
+}
+
+
+
+
+val yolo = YoloTFLite(this)
+
+val bitmap = BitmapFactory.decodeResource(resources, R.drawable.test)
+
+val detections = yolo.infer(bitmap)
+
+// Draw on original image
+val canvas = Canvas(bitmap)
+val paint = Paint().apply {
+    color = Color.RED
+    style = Paint.Style.STROKE
+    strokeWidth = 4f
+}
+
+for (d in detections) {
+    canvas.drawRect(d.left, d.top, d.right, d.bottom, paint)
+}
+
+
+
+
