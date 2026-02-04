@@ -1,14 +1,50 @@
+android {
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.example.yoloandroid"
+        minSdk 24
+        targetSdk 34
+    }
+}
+
 dependencies {
     implementation 'org.tensorflow:tensorflow-lite:2.14.0'
-    implementation 'org.tensorflow:tensorflow-lite-support:0.4.4'
 }
 
 
 
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
+
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <ImageView
+        android:id="@+id/imageView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="fitCenter" />
+
+</FrameLayout>
+
+
+package com.example.yoloandroid
+
+data class Detection(
+    val classId: Int,
+    val confidence: Float,
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float
+)
+
+
+
+package com.example.yoloandroid
+
+import android.graphics.*
 
 data class LetterboxResult(
     val bitmap: Bitmap,
@@ -17,25 +53,18 @@ data class LetterboxResult(
     val padY: Float
 )
 
-fun letterbox(
-    src: Bitmap,
-    dstSize: Int = 640
-): LetterboxResult {
-
-    val srcW = src.width
-    val srcH = src.height
-
+fun letterbox(src: Bitmap, dstSize: Int): LetterboxResult {
     val scale = minOf(
-        dstSize.toFloat() / srcW,
-        dstSize.toFloat() / srcH
+        dstSize.toFloat() / src.width,
+        dstSize.toFloat() / src.height
     )
 
-    val newW = (srcW * scale).toInt()
-    val newH = (srcH * scale).toInt()
+    val newW = (src.width * scale).toInt()
+    val newH = (src.height * scale).toInt()
 
     val resized = Bitmap.createScaledBitmap(src, newW, newH, true)
-
     val output = Bitmap.createBitmap(dstSize, dstSize, Bitmap.Config.ARGB_8888)
+
     val canvas = Canvas(output)
     canvas.drawColor(Color.GRAY)
 
@@ -48,25 +77,87 @@ fun letterbox(
 }
 
 
+
+
+package com.example.yoloandroid
+
+import android.graphics.*
+import android.os.*
+import android.widget.ImageView
+import androidx.appcompat.app.AppCompatActivity
+
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var imageView: ImageView
+    private lateinit var yolo: YoloTFLite
+    private lateinit var images: Array<String>
+    private var index = 0
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        imageView = findViewById(R.id.imageView)
+        yolo = YoloTFLite(this)
+
+        images = assets.list("images")!!
+        showNext()
+    }
+
+    private fun showNext() {
+        if (index >= images.size) return
+
+        val bmp = BitmapFactory.decodeStream(
+            assets.open("images/${images[index]}")
+        ).copy(Bitmap.Config.ARGB_8888, true)
+
+        val detections = yolo.infer(bmp)
+
+        drawBoxes(bmp, detections)
+        imageView.setImageBitmap(bmp)
+
+        index++
+        Handler(Looper.getMainLooper()).postDelayed({ showNext() }, 1500)
+    }
+
+    private fun drawBoxes(bitmap: Bitmap, dets: List<Detection>) {
+        val canvas = Canvas(bitmap)
+        val boxPaint = Paint().apply {
+            color = Color.RED
+            style = Paint.Style.STROKE
+            strokeWidth = 4f
+        }
+        val textPaint = Paint().apply {
+            color = Color.RED
+            textSize = 36f
+        }
+
+        for (d in dets) {
+            canvas.drawRect(d.left, d.top, d.right, d.bottom, boxPaint)
+            canvas.drawText(
+                "ID:${d.classId}",
+                d.left,
+                d.top - 10,
+                textPaint
+            )
+        }
+    }
+}
+
+
+
+
+package com.example.yoloandroid
+
 import android.content.Context
 import android.graphics.Bitmap
-import android.util.Log
 import org.tensorflow.lite.Interpreter
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-data class Detection(
-    val classId: Int,
-    val confidence: Float,
-    val left: Float,
-    val top: Float,
-    val right: Float,
-    val bottom: Float
-)
-
 class YoloTFLite(
     context: Context,
-    modelName: String = "yolo.tflite",
+    modelName: String = "yolov9c.tflite",
     private val inputSize: Int = 640,
     private val numClasses: Int = 80,
     private val confThreshold: Float = 0.25f
@@ -77,20 +168,22 @@ class YoloTFLite(
 
     fun infer(original: Bitmap): List<Detection> {
 
-        // 1️⃣ Letterbox
+        // 1️⃣ Letterbox (keeps aspect ratio)
         val lb = letterbox(original, inputSize)
 
-        // 2️⃣ Preprocess
+        // 2️⃣ Preprocess to Float32 NHWC
         val input = bitmapToBuffer(lb.bitmap)
 
-        // 3️⃣ Output buffer (YOLOv8 style)
-        val output = Array(1) { Array(8400) { FloatArray(5 + numClasses) } }
+        // 3️⃣ YOLOv9-C output buffer
+        // Shape: [1, 84, 8400]
+        val output = Array(1) { Array(5 + numClasses) { FloatArray(8400) } }
 
+        // 4️⃣ Run inference
         interpreter.run(input, output)
 
-        // 4️⃣ Parse + map back to original image
-        return parse(
-            output[0],
+        // 5️⃣ Parse + map back to original image
+        return parseYOLOv9(
+            output,
             lb.scale,
             lb.padX,
             lb.padY,
@@ -98,6 +191,8 @@ class YoloTFLite(
             original.height
         )
     }
+
+    // ---------------- PREPROCESS ----------------
 
     private fun bitmapToBuffer(bitmap: Bitmap): ByteBuffer {
         val buffer =
@@ -107,16 +202,18 @@ class YoloTFLite(
         for (y in 0 until inputSize) {
             for (x in 0 until inputSize) {
                 val px = bitmap.getPixel(x, y)
-                buffer.putFloat(((px shr 16) and 0xFF) / 255f)
-                buffer.putFloat(((px shr 8) and 0xFF) / 255f)
-                buffer.putFloat((px and 0xFF) / 255f)
+                buffer.putFloat(((px shr 16) and 0xFF) / 255f) // R
+                buffer.putFloat(((px shr 8) and 0xFF) / 255f)  // G
+                buffer.putFloat((px and 0xFF) / 255f)         // B
             }
         }
         return buffer
     }
 
-    private fun parse(
-        detections: Array<FloatArray>,
+    // ---------------- YOLOv9 PARSER ----------------
+
+    private fun parseYOLOv9(
+        output: Array<Array<FloatArray>>,
         scale: Float,
         padX: Float,
         padY: Float,
@@ -126,83 +223,51 @@ class YoloTFLite(
 
         val results = mutableListOf<Detection>()
 
-        for (det in detections) {
+        val numBoxes = output[0][0].size
+        val classOffset = 5  // cx,cy,w,h,obj
 
-            val objConf = det[4]
+        for (i in 0 until numBoxes) {
+
+            val objConf = output[0][4][i]
             if (objConf < confThreshold) continue
 
+            // Find best class
             var classId = -1
-            var maxClassScore = 0f
-
+            var bestScore = 0f
             for (c in 0 until numClasses) {
-                if (det[5 + c] > maxClassScore) {
-                    maxClassScore = det[5 + c]
+                val score = output[0][classOffset + c][i]
+                if (score > bestScore) {
+                    bestScore = score
                     classId = c
                 }
             }
 
-            val confidence = objConf * maxClassScore
+            val confidence = objConf * bestScore
             if (confidence < confThreshold) continue
 
-            // Model outputs normalized coords
-            val cx = det[0] * inputSize
-            val cy = det[1] * inputSize
-            val w = det[2] * inputSize
-            val h = det[3] * inputSize
+            // Box (normalized → input size)
+            val cx = output[0][0][i] * inputSize
+            val cy = output[0][1][i] * inputSize
+            val w  = output[0][2][i] * inputSize
+            val h  = output[0][3][i] * inputSize
 
-            // Remove padding & scale back
+            // Reverse letterbox
             val x1 = (cx - w / 2 - padX) / scale
             val y1 = (cy - h / 2 - padY) / scale
             val x2 = (cx + w / 2 - padX) / scale
             val y2 = (cy + h / 2 - padY) / scale
 
-            // Clamp
-            val left = x1.coerceIn(0f, origW.toFloat())
-            val top = y1.coerceIn(0f, origH.toFloat())
-            val right = x2.coerceIn(0f, origW.toFloat())
-            val bottom = y2.coerceIn(0f, origH.toFloat())
-
             results.add(
                 Detection(
-                    classId,
-                    confidence,
-                    left,
-                    top,
-                    right,
-                    bottom
+                    classId = classId,
+                    confidence = confidence,
+                    left = x1.coerceIn(0f, origW.toFloat()),
+                    top = y1.coerceIn(0f, origH.toFloat()),
+                    right = x2.coerceIn(0f, origW.toFloat()),
+                    bottom = y2.coerceIn(0f, origH.toFloat())
                 )
-            )
-
-            Log.d(
-                "YOLO",
-                "Class=$classId Conf=$confidence Box=[$left,$top,$right,$bottom]"
             )
         }
         return results
     }
 }
-
-
-
-
-val yolo = YoloTFLite(this)
-
-val bitmap = BitmapFactory.decodeResource(resources, R.drawable.test)
-
-val detections = yolo.infer(bitmap)
-
-// Draw on original image
-val canvas = Canvas(bitmap)
-val paint = Paint().apply {
-    color = Color.RED
-    style = Paint.Style.STROKE
-    strokeWidth = 4f
-}
-
-for (d in detections) {
-    canvas.drawRect(d.left, d.top, d.right, d.bottom, paint)
-}
-
-
-
-
