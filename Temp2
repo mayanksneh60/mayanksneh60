@@ -1,3 +1,110 @@
+<ImageView
+    android:id="@+id/imageView"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:scaleType="fitCenter" />
+
+
+
+
+
+
+
+
+
+package com.yourpackage.yolo
+
+import android.graphics.*
+import android.os.Bundle
+import androidx.appcompat.app.AppCompatActivity
+import android.widget.ImageView
+import java.io.InputStream
+
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var imageView: ImageView
+    private lateinit var yolo: YoloTFLite
+    private lateinit var imageList: List<String>
+    private var index = 0
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        imageView = findViewById(R.id.imageView)
+
+        yolo = YoloTFLite(this, "yolov9c.tflite")
+
+        imageList = assets.list("images")!!
+            .filter { it.endsWith(".jpg") || it.endsWith(".png") }
+
+        showNextImage()
+
+        imageView.setOnClickListener {
+            showNextImage()
+        }
+    }
+
+    private fun showNextImage() {
+        if (imageList.isEmpty()) return
+
+        val name = imageList[index % imageList.size]
+        index++
+
+        val input = assets.open("images/$name")
+        val bitmap = BitmapFactory.decodeStream(input)
+
+        val detections = yolo.detect(bitmap)
+
+        val output = drawDetections(bitmap, detections)
+
+        imageView.setImageBitmap(output)
+    }
+
+    /** -------- DRAW BBOX + CLASS -------- */
+    private fun drawDetections(
+        src: Bitmap,
+        detections: List<Detection>
+    ): Bitmap {
+
+        val out = src.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(out)
+
+        val boxPaint = Paint().apply {
+            color = Color.RED
+            style = Paint.Style.STROKE
+            strokeWidth = 4f
+        }
+
+        val textPaint = Paint().apply {
+            color = Color.RED
+            textSize = 36f
+            style = Paint.Style.FILL
+        }
+
+        for (det in detections) {
+            canvas.drawRect(det.box, boxPaint)
+            canvas.drawText(
+                "ID ${det.classId}",
+                det.box.left,
+                det.box.top - 8f,
+                textPaint
+            )
+        }
+
+        return out
+    }
+}
+
+
+
+
+
+
+
+
+
+
 package com.yourpackage.yolo
 
 import android.content.Context
