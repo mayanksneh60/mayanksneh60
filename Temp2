@@ -1,349 +1,48 @@
-private fun parseOutput(
-    output: Array<Array<FloatArray>>,
-    origW: Int,
-    origH: Int,
-    scale: Float,
-    padX: Float,
-    padY: Float
+private fun iou(a: RectF, b: RectF): Float {
+    val interLeft = max(a.left, b.left)
+    val interTop = max(a.top, b.top)
+    val interRight = min(a.right, b.right)
+    val interBottom = min(a.bottom, b.bottom)
+
+    val interArea =
+        max(0f, interRight - interLeft) *
+        max(0f, interBottom - interTop)
+
+    val areaA = (a.right - a.left) * (a.bottom - a.top)
+    val areaB = (b.right - b.left) * (b.bottom - b.top)
+
+    return interArea / (areaA + areaB - interArea + 1e-6f)
+}
+
+private fun nonMaxSuppression(
+    detections: List<Detection>,
+    iouThreshold: Float = 0.45f
 ): List<Detection> {
 
-    val detections = mutableListOf<Detection>()
+    val result = mutableListOf<Detection>()
 
-    for (i in 0 until 8400) {
+    // Process per class
+    val grouped = detections.groupBy { it.classId }
 
-        val score0 = output[0][4][i]   // class 0 confidence
-        val score1 = output[0][5][i]   // class 1 confidence
+    for ((_, classDetections) in grouped) {
 
-        val score: Float
-        val classId: Int
+        val sorted = classDetections.sortedByDescending { it.score }
+            .toMutableList()
 
-        if (score0 >= score1) {
-            score = score0
-            classId = 0
-        } else {
-            score = score1
-            classId = 1
+        while (sorted.isNotEmpty()) {
+            val best = sorted.removeAt(0)
+            result.add(best)
+
+            val it = sorted.iterator()
+            while (it.hasNext()) {
+                val other = it.next()
+                if (iou(best.box, other.box) > iouThreshold) {
+                    it.remove()
+                }
+            }
         }
-
-        if (score < 0.25f) continue
-
-        val cx = output[0][0][i] * inputSize
-        val cy = output[0][1][i] * inputSize
-        val w  = output[0][2][i] * inputSize
-        val h  = output[0][3][i] * inputSize
-
-        val x1 = (cx - w / 2f - padX) / scale
-        val y1 = (cy - h / 2f - padY) / scale
-        val x2 = (cx + w / 2f - padX) / scale
-        val y2 = (cy + h / 2f - padY) / scale
-
-        val rect = RectF(
-            max(0f, x1),
-            max(0f, y1),
-            min(origW.toFloat(), x2),
-            min(origH.toFloat(), y2)
-        )
-
-        detections.add(
-            Detection(
-                classId = classId,
-                score = score,
-                box = rect
-            )
-        )
     }
 
-    return detections
+    return result
 }
 
-
-
-<ImageView
-    android:id="@+id/imageView"
-    android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:scaleType="fitCenter" />
-
-
-
-
-
-
-
-
-
-package com.yourpackage.yolo
-
-import android.graphics.*
-import android.os.Bundle
-import androidx.appcompat.app.AppCompatActivity
-import android.widget.ImageView
-import java.io.InputStream
-
-class MainActivity : AppCompatActivity() {
-
-    private lateinit var imageView: ImageView
-    private lateinit var yolo: YoloTFLite
-    private lateinit var imageList: List<String>
-    private var index = 0
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
-
-        imageView = findViewById(R.id.imageView)
-
-        yolo = YoloTFLite(this, "yolov9c.tflite")
-
-        imageList = assets.list("images")!!
-            .filter { it.endsWith(".jpg") || it.endsWith(".png") }
-
-        showNextImage()
-
-        imageView.setOnClickListener {
-            showNextImage()
-        }
-    }
-
-    private fun showNextImage() {
-        if (imageList.isEmpty()) return
-
-        val name = imageList[index % imageList.size]
-        index++
-
-        val input = assets.open("images/$name")
-        val bitmap = BitmapFactory.decodeStream(input)
-
-        val detections = yolo.detect(bitmap)
-
-        val output = drawDetections(bitmap, detections)
-
-        imageView.setImageBitmap(output)
-    }
-
-    /** -------- DRAW BBOX + CLASS -------- */
-    private fun drawDetections(
-        src: Bitmap,
-        detections: List<Detection>
-    ): Bitmap {
-
-        val out = src.copy(Bitmap.Config.ARGB_8888, true)
-        val canvas = Canvas(out)
-
-        val boxPaint = Paint().apply {
-            color = Color.RED
-            style = Paint.Style.STROKE
-            strokeWidth = 4f
-        }
-
-        val textPaint = Paint().apply {
-            color = Color.RED
-            textSize = 36f
-            style = Paint.Style.FILL
-        }
-
-        for (det in detections) {
-            canvas.drawRect(det.box, boxPaint)
-            canvas.drawText(
-                "ID ${det.classId}",
-                det.box.left,
-                det.box.top - 8f,
-                textPaint
-            )
-        }
-
-        return out
-    }
-}
-
-
-
-
-
-
-
-
-
-
-package com.yourpackage.yolo
-
-import android.content.Context
-import android.graphics.*
-import android.util.Log
-import org.tensorflow.lite.Interpreter
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import kotlin.math.max
-import kotlin.math.min
-
-data class Detection(
-    val classId: Int,
-    val score: Float,
-    val box: RectF
-)
-
-class YoloTFLite(
-    context: Context,
-    modelName: String = "yolov9c.tflite",
-    private val inputSize: Int = 640
-) {
-
-    private val interpreter: Interpreter
-
-    init {
-        val model = loadModelFile(context, modelName)
-        interpreter = Interpreter(model)
-        logOutputShapes()
-    }
-
-    /** -------- PUBLIC INFERENCE API -------- */
-    fun detect(bitmap: Bitmap): List<Detection> {
-
-        val origW = bitmap.width
-        val origH = bitmap.height
-
-        val resized = letterbox(bitmap)
-        val inputBuffer = bitmapToBuffer(resized.bitmap)
-
-        val output = Array(1) { Array(6) { FloatArray(8400) } }
-
-        interpreter.run(inputBuffer, output)
-
-        return parseOutput(
-            output,
-            origW,
-            origH,
-            resized.scale,
-            resized.padX,
-            resized.padY
-        )
-    }
-
-    /** -------- OUTPUT PARSING (YOLOv9-C) -------- */
-    private fun parseOutput(
-        output: Array<Array<FloatArray>>,
-        origW: Int,
-        origH: Int,
-        scale: Float,
-        padX: Float,
-        padY: Float
-    ): List<Detection> {
-
-        val detections = mutableListOf<Detection>()
-
-        for (i in 0 until 8400) {
-
-            val score = output[0][4][i]
-            if (score < 0.25f) continue
-
-            val cx = output[0][0][i] * inputSize
-            val cy = output[0][1][i] * inputSize
-            val w  = output[0][2][i] * inputSize
-            val h  = output[0][3][i] * inputSize
-
-            val classId = output[0][5][i].toInt()
-
-            val x1 = (cx - w / 2f - padX) / scale
-            val y1 = (cy - h / 2f - padY) / scale
-            val x2 = (cx + w / 2f - padX) / scale
-            val y2 = (cy + h / 2f - padY) / scale
-
-            val rect = RectF(
-                max(0f, x1),
-                max(0f, y1),
-                min(origW.toFloat(), x2),
-                min(origH.toFloat(), y2)
-            )
-
-            detections.add(
-                Detection(classId, score, rect)
-            )
-        }
-
-        return detections
-    }
-
-    /** -------- LETTERBOX RESIZE -------- */
-    private data class LetterboxResult(
-        val bitmap: Bitmap,
-        val scale: Float,
-        val padX: Float,
-        val padY: Float
-    )
-
-    private fun letterbox(src: Bitmap): LetterboxResult {
-        val scale = min(
-            inputSize / src.width.toFloat(),
-            inputSize / src.height.toFloat()
-        )
-
-        val newW = (src.width * scale).toInt()
-        val newH = (src.height * scale).toInt()
-
-        val resized = Bitmap.createScaledBitmap(src, newW, newH, true)
-
-        val output = Bitmap.createBitmap(
-            inputSize,
-            inputSize,
-            Bitmap.Config.ARGB_8888
-        )
-
-        val canvas = Canvas(output)
-        canvas.drawColor(Color.BLACK)
-
-        val padX = (inputSize - newW) / 2f
-        val padY = (inputSize - newH) / 2f
-
-        canvas.drawBitmap(resized, padX, padY, null)
-
-        return LetterboxResult(output, scale, padX, padY)
-    }
-
-    /** -------- BITMAP → FLOAT BUFFER -------- */
-    private fun bitmapToBuffer(bitmap: Bitmap): ByteBuffer {
-
-        val buffer =
-            ByteBuffer.allocateDirect(1 * inputSize * inputSize * 3 * 4)
-        buffer.order(ByteOrder.nativeOrder())
-
-        val pixels = IntArray(inputSize * inputSize)
-        bitmap.getPixels(
-            pixels,
-            0,
-            inputSize,
-            0,
-            0,
-            inputSize,
-            inputSize
-        )
-
-        for (pixel in pixels) {
-            buffer.putFloat(((pixel shr 16) and 0xFF) / 255f)
-            buffer.putFloat(((pixel shr 8) and 0xFF) / 255f)
-            buffer.putFloat((pixel and 0xFF) / 255f)
-        }
-
-        buffer.rewind()
-        return buffer
-    }
-
-    /** -------- MODEL LOADER -------- */
-    private fun loadModelFile(context: Context, name: String): ByteBuffer {
-        val bytes = context.assets.open(name).readBytes()
-        return ByteBuffer
-            .allocateDirect(bytes.size)
-            .order(ByteOrder.nativeOrder())
-            .put(bytes)
-            .apply { rewind() }
-    }
-
-    /** -------- DEBUG -------- */
-    private fun logOutputShapes() {
-        for (i in 0 until interpreter.outputTensorCount) {
-            Log.d(
-                "YOLO",
-                "Output $i shape=${interpreter.getOutputTensor(i).shape().contentToString()}"
-            )
-        }
-    }
-}
