@@ -1,3 +1,63 @@
+private fun parseOutput(
+    output: Array<Array<FloatArray>>,
+    origW: Int,
+    origH: Int,
+    scale: Float,
+    padX: Float,
+    padY: Float
+): List<Detection> {
+
+    val detections = mutableListOf<Detection>()
+
+    for (i in 0 until 8400) {
+
+        val score0 = output[0][4][i]   // class 0 confidence
+        val score1 = output[0][5][i]   // class 1 confidence
+
+        val score: Float
+        val classId: Int
+
+        if (score0 >= score1) {
+            score = score0
+            classId = 0
+        } else {
+            score = score1
+            classId = 1
+        }
+
+        if (score < 0.25f) continue
+
+        val cx = output[0][0][i] * inputSize
+        val cy = output[0][1][i] * inputSize
+        val w  = output[0][2][i] * inputSize
+        val h  = output[0][3][i] * inputSize
+
+        val x1 = (cx - w / 2f - padX) / scale
+        val y1 = (cy - h / 2f - padY) / scale
+        val x2 = (cx + w / 2f - padX) / scale
+        val y2 = (cy + h / 2f - padY) / scale
+
+        val rect = RectF(
+            max(0f, x1),
+            max(0f, y1),
+            min(origW.toFloat(), x2),
+            min(origH.toFloat(), y2)
+        )
+
+        detections.add(
+            Detection(
+                classId = classId,
+                score = score,
+                box = rect
+            )
+        )
+    }
+
+    return detections
+}
+
+
+
 <ImageView
     android:id="@+id/imageView"
     android:layout_width="match_parent"
