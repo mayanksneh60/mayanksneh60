@@ -3,6 +3,7 @@ import json
 import csv
 import shutil
 from PIL import Image
+from tqdm import tqdm
 
 # ========= CONFIG =========
 INPUT_DIR = "path/to/input_folder"
@@ -16,12 +17,17 @@ os.makedirs(OUTPUT_IMAGE_DIR, exist_ok=True)
 rows = []
 copied_images = set()
 
-# Pillow optimization: avoid full image load
 Image.MAX_IMAGE_PIXELS = None
 
+# ---- Count JSON files once (fast) ----
+total_json = sum(
+    1 for e in os.scandir(INPUT_DIR)
+    if e.is_file() and e.name.endswith(".json")
+)
+
 with os.scandir(INPUT_DIR) as entries:
-    for entry in entries:
-        if not entry.name.endswith(".json") or not entry.is_file():
+    for entry in tqdm(entries, total=total_json, desc="Processing JSONs"):
+        if not entry.is_file() or not entry.name.endswith(".json"):
             continue
 
         json_path = entry.path
@@ -31,14 +37,14 @@ with os.scandir(INPUT_DIR) as entries:
         if not os.path.exists(image_path):
             continue
 
-        # ---- FAST IMAGE SIZE READ (no full decode) ----
+        # ---- Fast image size read ----
         try:
             with Image.open(image_path) as img:
                 img_width, img_height = img.size
         except Exception:
             continue
 
-        # ---- LOAD JSON ----
+        # ---- Load JSON ----
         try:
             with open(json_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -94,7 +100,7 @@ with os.scandir(INPUT_DIR) as entries:
             shutil.copy2(image_path, os.path.join(OUTPUT_IMAGE_DIR, image_name))
             copied_images.add(image_name)
 
-# ---- WRITE CSV ONCE ----
+# ---- WRITE CSV ----
 with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
     writer = csv.writer(f)
     writer.writerow([
@@ -107,5 +113,5 @@ with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
     ])
     writer.writerows(rows)
 
-print(f"Processed {len(copied_images)} images")
-print(f"CSV rows written: {len(rows)}")
+print(f"\nProcessed images: {len(copied_images)}")
+print(f"Total annotations: {len(rows)}")
