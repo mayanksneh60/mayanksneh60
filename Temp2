@@ -4,16 +4,17 @@ import csv
 import shutil
 from PIL import Image
 
-INPUT_DIR = "path/to/input_folder"      # folder with all json + jpg files
+# ========= CONFIG =========
+INPUT_DIR = "path/to/input_folder"      # folder with all json + jpg
 OUTPUT_CSV = "final_annotations.csv"
 OUTPUT_IMAGE_DIR = "processed_images"
+TARGET_CLASS = "android.widget.EditText"
+# ==========================
 
 os.makedirs(OUTPUT_IMAGE_DIR, exist_ok=True)
 
 rows = []
 copied_images = set()
-
-TARGET_CLASS = "android.widget.EditText"
 
 for file in os.listdir(INPUT_DIR):
     if not file.endswith(".json"):
@@ -23,23 +24,27 @@ for file in os.listdir(INPUT_DIR):
     image_name = file.replace(".json", ".jpg")
     image_path = os.path.join(INPUT_DIR, image_name)
 
-    # Skip if image does not exist
     if not os.path.exists(image_path):
-        print(f"Image not found for {file}")
+        print(f"[WARN] Image not found for {file}")
         continue
 
-    # Read image size
+    # Load image size
     with Image.open(image_path) as img:
         img_width, img_height = img.size
 
     # Load JSON
-    with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"[ERROR] Failed to read {file}: {e}")
+        continue
 
     valid_view_found = False
 
     for view in data.get("views", []):
-        # 🔹 FILTER: only EditText
+
+        # ---- FILTER: only EditText ----
         if view.get("class") != TARGET_CLASS:
             continue
 
@@ -51,13 +56,22 @@ for file in os.listdir(INPUT_DIR):
 
         (x1, y1), (x2, y2) = bounds
 
-        # Bounding box calculations
+        # ---- STRICT BOUND CHECK ----
+        # Bounds must be fully inside image
+        if (
+            x1 < 0 or y1 < 0 or
+            x2 > img_width or y2 > img_height or
+            x2 <= x1 or y2 <= y1
+        ):
+            continue
+
+        # ---- BOX CALCULATION ----
         box_width = x2 - x1
         box_height = y2 - y1
         x_center = x1 + box_width / 2
         y_center = y1 + box_height / 2
 
-        # Normalize
+        # ---- NORMALIZE ----
         x_center /= img_width
         y_center /= img_height
         box_width /= img_width
@@ -76,16 +90,25 @@ for file in os.listdir(INPUT_DIR):
 
         valid_view_found = True
 
-    # Copy image only if at least one EditText annotation exists
+    # ---- COPY IMAGE IF AT LEAST ONE VALID EditText EXISTS ----
     if valid_view_found and image_name not in copied_images:
         shutil.copy2(image_path, os.path.join(OUTPUT_IMAGE_DIR, image_name))
         copied_images.add(image_name)
 
-# Write CSV
+# ---- WRITE CSV ----
 with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
     writer = csv.writer(f)
-    writer.writerow(["image_name", "class_id", "x_center", "y_center", "width", "height"])
+    writer.writerow([
+        "image_name",
+        "class_id",
+        "x_center",
+        "y_center",
+        "width",
+        "height"
+    ])
     writer.writerows(rows)
 
-print(f"CSV saved to {OUTPUT_CSV}")
-print(f"Copied {len(copied_images)} images to '{OUTPUT_IMAGE_DIR}'")
+print("===================================")
+print(f"CSV saved to: {OUTPUT_CSV}")
+print(f"Images copied: {len(copied_images)}")
+print("===================================")
