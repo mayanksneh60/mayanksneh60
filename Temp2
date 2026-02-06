@@ -13,6 +13,8 @@ os.makedirs(OUTPUT_IMAGE_DIR, exist_ok=True)
 rows = []
 copied_images = set()
 
+TARGET_CLASS = "android.widget.EditText"
+
 for file in os.listdir(INPUT_DIR):
     if not file.endswith(".json"):
         continue
@@ -37,6 +39,10 @@ for file in os.listdir(INPUT_DIR):
     valid_view_found = False
 
     for view in data.get("views", []):
+        # 🔹 FILTER: only EditText
+        if view.get("class") != TARGET_CLASS:
+            continue
+
         bounds = view.get("bounds")
         focused = view.get("focused", False)
 
@@ -70,7 +76,7 @@ for file in os.listdir(INPUT_DIR):
 
         valid_view_found = True
 
-    # Copy image only if at least one valid annotation exists
+    # Copy image only if at least one EditText annotation exists
     if valid_view_found and image_name not in copied_images:
         shutil.copy2(image_path, os.path.join(OUTPUT_IMAGE_DIR, image_name))
         copied_images.add(image_name)
