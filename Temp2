@@ -4,77 +4,76 @@ import csv
 import shutil
 from PIL import Image
 
-ROOT_DIR = "path/to/root_folder"        # folder containing 4 subfolders
+INPUT_DIR = "path/to/input_folder"      # folder with all json + jpg files
 OUTPUT_CSV = "final_annotations.csv"
-OUTPUT_IMAGE_DIR = "processed_images"  # new folder for copied images
+OUTPUT_IMAGE_DIR = "processed_images"
 
 os.makedirs(OUTPUT_IMAGE_DIR, exist_ok=True)
 
 rows = []
-copied_images = set()  # to avoid copying same image multiple times
+copied_images = set()
 
-for root, _, files in os.walk(ROOT_DIR):
-    for file in files:
-        if not file.endswith(".json"):
+for file in os.listdir(INPUT_DIR):
+    if not file.endswith(".json"):
+        continue
+
+    json_path = os.path.join(INPUT_DIR, file)
+    image_name = file.replace(".json", ".jpg")
+    image_path = os.path.join(INPUT_DIR, image_name)
+
+    # Skip if image does not exist
+    if not os.path.exists(image_path):
+        print(f"Image not found for {file}")
+        continue
+
+    # Read image size
+    with Image.open(image_path) as img:
+        img_width, img_height = img.size
+
+    # Load JSON
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    valid_view_found = False
+
+    for view in data.get("views", []):
+        bounds = view.get("bounds")
+        focused = view.get("focused", False)
+
+        if not bounds or len(bounds) != 2:
             continue
 
-        json_path = os.path.join(root, file)
-        image_name = file.replace(".json", ".jpg")
-        image_path = os.path.join(root, image_name)
+        (x1, y1), (x2, y2) = bounds
 
-        # Skip if image does not exist
-        if not os.path.exists(image_path):
-            print(f"Image not found for {json_path}")
-            continue
+        # Bounding box calculations
+        box_width = x2 - x1
+        box_height = y2 - y1
+        x_center = x1 + box_width / 2
+        y_center = y1 + box_height / 2
 
-        # Read image size
-        with Image.open(image_path) as img:
-            img_width, img_height = img.size
+        # Normalize
+        x_center /= img_width
+        y_center /= img_height
+        box_width /= img_width
+        box_height /= img_height
 
-        # Load JSON
-        with open(json_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        class_id = 1 if focused else 0
 
-        valid_view_found = False
+        rows.append([
+            image_name,
+            class_id,
+            round(x_center, 6),
+            round(y_center, 6),
+            round(box_width, 6),
+            round(box_height, 6)
+        ])
 
-        for view in data.get("views", []):
-            bounds = view.get("bounds")
-            focused = view.get("focused", False)
+        valid_view_found = True
 
-            if not bounds or len(bounds) != 2:
-                continue
-
-            (x1, y1), (x2, y2) = bounds
-
-            # Bounding box calculations
-            box_width = x2 - x1
-            box_height = y2 - y1
-            x_center = x1 + box_width / 2
-            y_center = y1 + box_height / 2
-
-            # Normalize
-            x_center /= img_width
-            y_center /= img_height
-            box_width /= img_width
-            box_height /= img_height
-
-            class_id = 1 if focused else 0
-
-            rows.append([
-                image_name,
-                class_id,
-                round(x_center, 6),
-                round(y_center, 6),
-                round(box_width, 6),
-                round(box_height, 6)
-            ])
-
-            valid_view_found = True
-
-        # Copy image only if at least one valid annotation exists
-        if valid_view_found and image_name not in copied_images:
-            shutil.copy2(image_path, os.path.join(OUTPUT_IMAGE_DIR, image_name))
-            copied_images.add(image_name)
+    # Copy image only if at least one valid annotation exists
+    if valid_view_found and image_name not in copied_images:
+        shutil.copy2(image_path, os.path.join(OUTPUT_IMAGE_DIR, image_name))
+        copied_images.add(image_name)
 
 # Write CSV
 with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
