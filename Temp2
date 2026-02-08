@@ -1,117 +1,45 @@
 import os
-import json
-import csv
 import shutil
-from PIL import Image
 from tqdm import tqdm
 
-# ========= CONFIG =========
-INPUT_DIR = "path/to/input_folder"
-OUTPUT_CSV = "final_annotations.csv"
-OUTPUT_IMAGE_DIR = "processed_images"
-TARGET_CLASS = "android.widget.EditText"
-# ==========================
+SRC_ROOT = "yolo_dataset"
+DST_ROOT = "yolo_dataset_filtered"
 
-os.makedirs(OUTPUT_IMAGE_DIR, exist_ok=True)
+THRESHOLD = 300000
+SPLITS = ["train", "val"]
 
-rows = []
-copied_images = set()
+IMG_EXTS = {".jpg", ".jpeg", ".png"}
 
-Image.MAX_IMAGE_PIXELS = None
+for split in SPLITS:
+    src_img_dir = os.path.join(SRC_ROOT, "images", split)
+    src_lbl_dir = os.path.join(SRC_ROOT, "labels", split)
 
-# ---- Count JSON files once (fast) ----
-total_json = sum(
-    1 for e in os.scandir(INPUT_DIR)
-    if e.is_file() and e.name.endswith(".json")
-)
+    dst_img_dir = os.path.join(DST_ROOT, "images", split)
+    dst_lbl_dir = os.path.join(DST_ROOT, "labels", split)
 
-with os.scandir(INPUT_DIR) as entries:
-    for entry in tqdm(entries, total=total_json, desc="Processing JSONs"):
-        if not entry.is_file() or not entry.name.endswith(".json"):
+    os.makedirs(dst_img_dir, exist_ok=True)
+    os.makedirs(dst_lbl_dir, exist_ok=True)
+
+    files = os.listdir(src_img_dir)
+
+    for img in tqdm(files, desc=f"Processing {split}"):
+        name, ext = os.path.splitext(img)
+
+        if ext.lower() not in IMG_EXTS:
             continue
 
-        json_path = entry.path
-        image_name = entry.name.replace(".json", ".jpg")
-        image_path = os.path.join(INPUT_DIR, image_name)
-
-        if not os.path.exists(image_path):
+        if not name.isdigit():
             continue
 
-        # ---- Fast image size read ----
-        try:
-            with Image.open(image_path) as img:
-                img_width, img_height = img.size
-        except Exception:
+        if int(name) < THRESHOLD:
             continue
 
-        # ---- Load JSON ----
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            continue
+        src_img = os.path.join(src_img_dir, img)
+        src_lbl = os.path.join(src_lbl_dir, name + ".txt")
 
-        valid_view_found = False
+        # Copy image
+        shutil.copy2(src_img, os.path.join(dst_img_dir, img))
 
-        for view in data.get("views", []):
-
-            if view.get("class") != TARGET_CLASS:
-                continue
-
-            bounds = view.get("bounds")
-            focused = view.get("focused", False)
-
-            if not bounds or len(bounds) != 2:
-                continue
-
-            (x1, y1), (x2, y2) = bounds
-
-            # ---- STRICT IN-IMAGE CHECK ----
-            if (
-                x1 < 0 or y1 < 0 or
-                x2 > img_width or y2 > img_height or
-                x2 <= x1 or y2 <= y1
-            ):
-                continue
-
-            box_width = x2 - x1
-            box_height = y2 - y1
-
-            x_center = (x1 + x2) / 2 / img_width
-            y_center = (y1 + y2) / 2 / img_height
-
-            box_width /= img_width
-            box_height /= img_height
-
-            class_id = 1 if focused else 0
-
-            rows.append([
-                image_name,
-                class_id,
-                round(x_center, 6),
-                round(y_center, 6),
-                round(box_width, 6),
-                round(box_height, 6)
-            ])
-
-            valid_view_found = True
-
-        if valid_view_found and image_name not in copied_images:
-            shutil.copy2(image_path, os.path.join(OUTPUT_IMAGE_DIR, image_name))
-            copied_images.add(image_name)
-
-# ---- WRITE CSV ----
-with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
-    writer = csv.writer(f)
-    writer.writerow([
-        "image_name",
-        "class_id",
-        "x_center",
-        "y_center",
-        "width",
-        "height"
-    ])
-    writer.writerows(rows)
-
-print(f"\nProcessed images: {len(copied_images)}")
-print(f"Total annotations: {len(rows)}")
+        # Copy label only if exists
+        if os.path.exists(src_lbl):
+            shutil.copy2(src_lbl, os.path.join(dst_lbl_dir, name + ".txt"))
