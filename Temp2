@@ -13,71 +13,108 @@ import os
 import json
 from pathlib import Path
 from PIL import Image
+from tqdm import tqdm
 
-classes = ["focused_edittext", "normal_edittext"]
+# ===== CONFIG =====
+YOLO_ROOT = "yolo_dataset"  # your dataset root
+OUTPUT_ROOT = "edittext_dataset"  # output dataset for YOLOX
 
-def convert(images_dir, labels_dir, output_json):
+# Update class names here
+CLASSES = ["focused_edittext", "normal_edittext"]
+
+# ==================
+
+def convert_split(split_name):
+    print(f"\nConverting {split_name} set...")
+
+    images_dir = Path(YOLO_ROOT) / "images" / split_name
+    labels_dir = Path(YOLO_ROOT) / "labels" / split_name
+
+    output_images_dir = Path(OUTPUT_ROOT) / f"{split_name}2017"
+    output_ann_dir = Path(OUTPUT_ROOT) / "annotations"
+
+    output_images_dir.mkdir(parents=True, exist_ok=True)
+    output_ann_dir.mkdir(parents=True, exist_ok=True)
+
     coco = {
         "images": [],
         "annotations": [],
         "categories": []
     }
 
-    for i, cls in enumerate(classes):
+    # Categories
+    for i, cls_name in enumerate(CLASSES):
         coco["categories"].append({
             "id": i,
-            "name": cls,
+            "name": cls_name,
             "supercategory": "ui"
         })
 
     annotation_id = 0
     image_id = 0
 
-    for img_file in os.listdir(images_dir):
-        if not img_file.lower().endswith((".jpg", ".png", ".jpeg")):
+    image_files = list(images_dir.glob("*.*"))
+
+    for img_path in tqdm(image_files):
+        if img_path.suffix.lower() not in [".jpg", ".jpeg", ".png"]:
             continue
 
-        img_path = os.path.join(images_dir, img_file)
-        label_path = os.path.join(labels_dir, img_file.replace(".jpg", ".txt").replace(".png", ".txt"))
+        # Copy image into new dataset structure
+        new_img_path = output_images_dir / img_path.name
+        if not new_img_path.exists():
+            os.system(f'cp "{img_path}" "{new_img_path}"')
 
         width, height = Image.open(img_path).size
 
         coco["images"].append({
-            "file_name": img_file,
+            "file_name": img_path.name,
             "height": height,
             "width": width,
             "id": image_id
         })
 
-        if os.path.exists(label_path):
-            with open(label_path) as f:
-                for line in f.readlines():
-                    cls_id, x, y, w, h = map(float, line.strip().split())
+        label_path = labels_dir / (img_path.stem + ".txt")
 
-                    x_min = (x - w/2) * width
-                    y_min = (y - h/2) * height
-                    bbox_w = w * width
-                    bbox_h = h * height
+        if label_path.exists():
+            with open(label_path, "r") as f:
+                lines = f.readlines()
 
-                    coco["annotations"].append({
-                        "id": annotation_id,
-                        "image_id": image_id,
-                        "category_id": int(cls_id),
-                        "bbox": [x_min, y_min, bbox_w, bbox_h],
-                        "area": bbox_w * bbox_h,
-                        "iscrowd": 0
-                    })
+            for line in lines:
+                cls_id, x, y, w, h = map(float, line.strip().split())
 
-                    annotation_id += 1
+                # Convert YOLO -> COCO bbox
+                x_min = (x - w/2) * width
+                y_min = (y - h/2) * height
+                bbox_w = w * width
+                bbox_h = h * height
+
+                coco["annotations"].append({
+                    "id": annotation_id,
+                    "image_id": image_id,
+                    "category_id": int(cls_id),
+                    "bbox": [x_min, y_min, bbox_w, bbox_h],
+                    "area": bbox_w * bbox_h,
+                    "iscrowd": 0
+                })
+
+                annotation_id += 1
 
         image_id += 1
 
+    # Save JSON
+    output_json = output_ann_dir / f"instances_{split_name}2017.json"
     with open(output_json, "w") as f:
         json.dump(coco, f)
 
-    print("Saved:", output_json)
+    print(f"{split_name} conversion complete!")
+    print(f"Saved annotations to: {output_json}")
 
 
+if __name__ == "__main__":
+    convert_split("train")
+    convert_split("val")
+
+    print("\nAll done ✅")
 
 
 from yolox.exp import Exp as MyExp
