@@ -1,45 +1,123 @@
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+
+
+
+git clone https://github.com/Megvii-BaseDetection/YOLOX.git
+cd YOLOX
+pip install -r requirements.txt
+pip install -v -e .
+
+
+
 import os
-import shutil
-from tqdm import tqdm
+import json
+from pathlib import Path
+from PIL import Image
 
-SRC_ROOT = "yolo_dataset"
-DST_ROOT = "yolo_dataset_filtered"
+classes = ["focused_edittext", "normal_edittext"]
 
-THRESHOLD = 300000
-SPLITS = ["train", "val"]
+def convert(images_dir, labels_dir, output_json):
+    coco = {
+        "images": [],
+        "annotations": [],
+        "categories": []
+    }
 
-IMG_EXTS = {".jpg", ".jpeg", ".png"}
+    for i, cls in enumerate(classes):
+        coco["categories"].append({
+            "id": i,
+            "name": cls,
+            "supercategory": "ui"
+        })
 
-for split in SPLITS:
-    src_img_dir = os.path.join(SRC_ROOT, "images", split)
-    src_lbl_dir = os.path.join(SRC_ROOT, "labels", split)
+    annotation_id = 0
+    image_id = 0
 
-    dst_img_dir = os.path.join(DST_ROOT, "images", split)
-    dst_lbl_dir = os.path.join(DST_ROOT, "labels", split)
-
-    os.makedirs(dst_img_dir, exist_ok=True)
-    os.makedirs(dst_lbl_dir, exist_ok=True)
-
-    files = os.listdir(src_img_dir)
-
-    for img in tqdm(files, desc=f"Processing {split}"):
-        name, ext = os.path.splitext(img)
-
-        if ext.lower() not in IMG_EXTS:
+    for img_file in os.listdir(images_dir):
+        if not img_file.lower().endswith((".jpg", ".png", ".jpeg")):
             continue
 
-        if not name.isdigit():
-            continue
+        img_path = os.path.join(images_dir, img_file)
+        label_path = os.path.join(labels_dir, img_file.replace(".jpg", ".txt").replace(".png", ".txt"))
 
-        if int(name) < THRESHOLD:
-            continue
+        width, height = Image.open(img_path).size
 
-        src_img = os.path.join(src_img_dir, img)
-        src_lbl = os.path.join(src_lbl_dir, name + ".txt")
+        coco["images"].append({
+            "file_name": img_file,
+            "height": height,
+            "width": width,
+            "id": image_id
+        })
 
-        # Copy image
-        shutil.copy2(src_img, os.path.join(dst_img_dir, img))
+        if os.path.exists(label_path):
+            with open(label_path) as f:
+                for line in f.readlines():
+                    cls_id, x, y, w, h = map(float, line.strip().split())
 
-        # Copy label only if exists
-        if os.path.exists(src_lbl):
-            shutil.copy2(src_lbl, os.path.join(dst_lbl_dir, name + ".txt"))
+                    x_min = (x - w/2) * width
+                    y_min = (y - h/2) * height
+                    bbox_w = w * width
+                    bbox_h = h * height
+
+                    coco["annotations"].append({
+                        "id": annotation_id,
+                        "image_id": image_id,
+                        "category_id": int(cls_id),
+                        "bbox": [x_min, y_min, bbox_w, bbox_h],
+                        "area": bbox_w * bbox_h,
+                        "iscrowd": 0
+                    })
+
+                    annotation_id += 1
+
+        image_id += 1
+
+    with open(output_json, "w") as f:
+        json.dump(coco, f)
+
+    print("Saved:", output_json)
+
+
+
+
+from yolox.exp import Exp as MyExp
+
+class Exp(MyExp):
+    def __init__(self):
+        super().__init__()
+
+        # IMPORTANT
+        self.num_classes = 2
+
+        # Model size (choose based on device)
+        self.depth = 0.33
+        self.width = 0.50
+
+        self.data_dir = "datasets/edittext_dataset"
+        self.train_ann = "instances_train2017.json"
+        self.val_ann = "instances_val2017.json"
+
+        self.max_epoch = 200
+        self.data_num_workers = 4
+        self.eval_interval = 10
+
+        self.input_size = (640, 640)
+        self.test_size = (640, 640)
+
+
+
+
+python tools/train.py -f exps/example/yolox_edittext.py -d 1 -b 16 --fp16
+
+
+
+python tools/eval.py \
+-f exps/example/yolox_edittext.py \
+-c YOLOX_outputs/yolox_edittext/best_ckpt.pth \
+-b 16
+
+
+
+python tools/export_onnx.py \
+-f exps/example/yolox_edittext.py \
+-c YOLOX_outputs/yolox_edittext/bes
