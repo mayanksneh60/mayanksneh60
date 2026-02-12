@@ -1,4 +1,17 @@
 python tools/train.py -c configs/rtdetr/rtdetr_r18vd_6x_coco.yml \
+    -o use_gpu=True \
+    -o TrainDataset.dataset_dir=./ \
+    -o TrainDataset.anno_path=train.json \
+    -o TrainDataset.image_dir=images/train \
+    -o EvalDataset.dataset_dir=./ \
+    -o EvalDataset.anno_path=val.json \
+    -o EvalDataset.image_dir=images/val \
+    -o num_classes=2 \
+    --eval
+
+
+
+python tools/train.py -c configs/rtdetr/rtdetr_r18vd_6x_coco.yml \
     -o TrainDataset.anno_path=train.json \
     -o TrainDataset.dataset_dir=./ \
     -o EvalDataset.anno_path=val.json \
