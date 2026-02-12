@@ -1,3 +1,29 @@
+metric: COCO
+num_classes: 2
+
+TrainDataset:
+  !COCODataSet
+  image_dir: images/train
+  anno_path: annotations/train.json
+  dataset_dir: ../Dataset_Root
+  data_fields: ['image', 'gt_bbox', 'gt_class', 'is_crowd']
+
+EvalDataset:
+  !COCODataSet
+  image_dir: images/val
+  anno_path: annotations/val.json
+  dataset_dir: ../Dataset_Root
+  data_fields: ['image', 'gt_bbox', 'gt_class', 'is_crowd']
+
+TestDataset:
+  !COCODataSet
+  image_dir: images/val
+  anno_path: annotations/val.json
+  dataset_dir: ../Dataset_Root
+  data_fields: ['image']
+
+
+
 python tools/train.py -c configs/rtdetr/rtdetr_r18vd_6x_coco.yml \
     -o use_gpu=True \
     -o num_classes=2 \
