@@ -1,70 +1,13 @@
+python tools/train.py -c configs/rtdetr/rtdetr_r18vd_6x_coco.yml \
+    -o TrainDataset.anno_path=train.json \
+    -o TrainDataset.dataset_dir=./ \
+    -o EvalDataset.anno_path=val.json \
+    -o EvalDataset.dataset_dir=./ \
+    -o num_classes=2 \
+    --eval
+
+
+
 python tools/train.py -c configs/rtdetr/rtdetr_r18vd_6e_coco.yml \
                       -o dataset_config.yml=custom_data.yml \
                       --eval
-
-
-
-import os
-import json
-import cv2
-
-def convert_yolo_to_coco(image_dir, label_dir, output_json, classes):
-    coco = {
-        "images": [],
-        "annotations": [],
-        "categories": [{"id": i, "name": cls} for i, cls in enumerate(classes)]
-    }
-
-    ann_id = 0
-    img_id = 0
-
-    if not os.path.exists(image_dir):
-        print(f"Error: Directory {image_dir} not found.")
-        return
-
-    for img_name in os.listdir(image_dir):
-        if not img_name.lower().endswith(('.jpg', '.jpeg', '.png')):
-            continue
-            
-        img_path = os.path.join(image_dir, img_name)
-        img = cv2.imread(img_path)
-        if img is None: continue
-        h_img, w_img, _ = img.shape
-
-        coco["images"].append({
-            "id": img_id, "file_name": img_name, 
-            "width": w_img, "height": h_img
-        })
-
-        label_path = os.path.join(label_dir, os.path.splitext(img_name)[0] + ".txt")
-
-        if os.path.exists(label_path):
-            with open(label_path, "r") as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if len(parts) != 5: continue # Skip invalid lines
-                    
-                    cls_id, x_c, y_c, w, h = map(float, parts)
-                    # Convert YOLO (normalized) to COCO (pixel)
-                    abs_w, abs_h = w * w_img, h * h_img
-                    x_min = (x_c * w_img) - (abs_w / 2)
-                    y_min = (y_c * h_img) - (abs_h / 2)
-
-                    coco["annotations"].append({
-                        "id": ann_id, "image_id": img_id,
-                        "category_id": int(cls_id),
-                        "bbox": [x_min, y_min, abs_w, abs_h],
-                        "area": abs_w * abs_h, "iscrowd": 0
-                    })
-                    ann_id += 1
-        img_id += 1
-
-    with open(output_json, "w") as f:
-        json.dump(coco, f)
-    print(f"Successfully created {output_json}")
-
-# --- SETTINGS ---
-CLASSES = ["normal_edit_text", "focused_edit_text"]
-# Adjust paths based on your local structure
-convert_yolo_to_coco("images/train", "labels/train", "train.json", CLASSES)
-convert_yolo_to_coco("images/val", "labels/val", "val.json", CLASSES)
