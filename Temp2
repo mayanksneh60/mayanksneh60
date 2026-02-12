@@ -1,3 +1,9 @@
+python tools/train.py -c configs/rtdetr/rtdetr_r18vd_6e_coco.yml \
+                      -o dataset_config.yml=custom_data.yml \
+                      --eval
+
+
+
 import os
 import json
 import cv2
