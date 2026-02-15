@@ -1,66 +1,94 @@
-metric: COCO
-num_classes: 2
+import os
+import torch
+import onnx
+import tensorflow as tf
+from yolox.exp import get_exp
 
-TrainDataset:
-  !COCODataSet
-  image_dir: images/train
-  anno_path: annotations/train.json
-  dataset_dir: ../Dataset_Root
-  data_fields: ['image', 'gt_bbox', 'gt_class', 'is_crowd']
+# =============================
+# CONFIGURATION
+# =============================
 
-EvalDataset:
-  !COCODataSet
-  image_dir: images/val
-  anno_path: annotations/val.json
-  dataset_dir: ../Dataset_Root
-  data_fields: ['image', 'gt_bbox', 'gt_class', 'is_crowd']
+EXP_FILE = "exps/example/yolox_edittext_nano.py"
+CKPT_FILE = "YOLOX_outputs/yolox_edittext_nano/best_ckpt.pth"
+ONNX_FILE = "yolox_model.onnx"
+ONNX_SIM_FILE = "yolox_model_sim.onnx"
+TF_MODEL_DIR = "yolox_saved_model"
+TFLITE_FILE = "yolox_model.tflite"
+INPUT_SIZE = 640
 
-TestDataset:
-  !COCODataSet
-  image_dir: images/val
-  anno_path: annotations/val.json
-  dataset_dir: ../Dataset_Root
-  data_fields: ['image']
+# =============================
+# STEP 1 — LOAD MODEL
+# =============================
 
+print("Loading YOLOX model...")
 
+exp = get_exp(EXP_FILE, None)
+model = exp.get_model()
+ckpt = torch.load(CKPT_FILE, map_location="cpu")
+model.load_state_dict(ckpt["model"])
+model.eval()
 
-python tools/train.py -c configs/rtdetr/rtdetr_r18vd_6x_coco.yml \
-    -o use_gpu=True \
-    -o num_classes=2 \
-    -o TrainDataset.dataset_dir=../Dataset_Root/ \
-    -o TrainDataset.anno_path=annotations/train.json \
-    -o TrainDataset.image_dir=images/train \
-    -o EvalDataset.dataset_dir=../Dataset_Root/ \
-    -o EvalDataset.anno_path=annotations/val.json \
-    -o EvalDataset.image_dir=images/val \
-    --eval
+dummy_input = torch.randn(1, 3, INPUT_SIZE, INPUT_SIZE)
 
+# =============================
+# STEP 2 — EXPORT TO ONNX
+# =============================
 
+print("Exporting to ONNX...")
 
+torch.onnx.export(
+    model,
+    dummy_input,
+    ONNX_FILE,
+    input_names=["input"],
+    output_names=["output"],
+    opset_version=11,
+)
 
-python tools/train.py -c configs/rtdetr/rtdetr_r18vd_6x_coco.yml \
-    -o use_gpu=True \
-    -o TrainDataset.dataset_dir=./ \
-    -o TrainDataset.anno_path=train.json \
-    -o TrainDataset.image_dir=images/train \
-    -o EvalDataset.dataset_dir=./ \
-    -o EvalDataset.anno_path=val.json \
-    -o EvalDataset.image_dir=images/val \
-    -o num_classes=2 \
-    --eval
+print("ONNX export complete.")
 
+# =============================
+# STEP 3 — SIMPLIFY ONNX
+# =============================
 
+print("Simplifying ONNX...")
+import onnxsim
 
-python tools/train.py -c configs/rtdetr/rtdetr_r18vd_6x_coco.yml \
-    -o TrainDataset.anno_path=train.json \
-    -o TrainDataset.dataset_dir=./ \
-    -o EvalDataset.anno_path=val.json \
-    -o EvalDataset.dataset_dir=./ \
-    -o num_classes=2 \
-    --eval
+model_onnx = onnx.load(ONNX_FILE)
+model_sim, check = onnxsim.simplify(model_onnx)
 
+assert check, "ONNX simplification failed"
+onnx.save(model_sim, ONNX_SIM_FILE)
 
+print("ONNX simplified.")
 
-python tools/train.py -c configs/rtdetr/rtdetr_r18vd_6e_coco.yml \
-                      -o dataset_config.yml=custom_data.yml \
-                      --eval
+# =============================
+# STEP 4 — ONNX → TF
+# =============================
+
+print("Converting ONNX to TensorFlow...")
+from onnx_tf.backend import prepare
+
+onnx_model = onnx.load(ONNX_SIM_FILE)
+tf_rep = prepare(onnx_model)
+tf_rep.export_graph(TF_MODEL_DIR)
+
+print("SavedModel exported.")
+
+# =============================
+# STEP 5 — TF → TFLite
+# =============================
+
+print("Converting to TFLite...")
+
+converter = tf.lite.TFLiteConverter.from_saved_model(TF_MODEL_DIR)
+converter.optimizations = [tf.lite.Optimize.DEFAULT]
+converter.target_spec.supported_types = [tf.float16]  # FP16 quantization
+
+tflite_model = converter.convert()
+
+with open(TFLITE_FILE, "wb") as f:
+    f.write(tflite_model)
+
+print("TFLite model saved:", TFLITE_FILE)
+print("Conversion complete.")
