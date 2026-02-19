@@ -1,3 +1,14 @@
+python - <<EOF
+import json
+
+with open("annotations/instances_train2017.json") as f:
+    data = json.load(f)
+
+print("Images count:", len(data["images"]))
+print("Annotations count:", len(data["annotations"]))
+EOF
+
+
 import os
 import torch
 import onnx
