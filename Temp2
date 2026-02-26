@@ -1,18 +1,36 @@
-pip install --upgrade pip setuptools wheel
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-python -m pip install -e . --no-build-isolation
-pip install torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cu118
-pip install numpy==1.26.4
+import tensorflow as tf
+import numpy as np
 
+MODEL_PATH = "yolox_model.tflite"
 
+# Load model
+interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
+interpreter.allocate_tensors()
 
+print("\n===== MODEL DETAILS =====")
 
-import pandas as pd
+# Input details
+input_details = interpreter.get_input_details()
+print("\n--- INPUT DETAILS ---")
+for inp in input_details:
+    print("Name:", inp["name"])
+    print("Shape:", inp["shape"])
+    print("Dtype:", inp["dtype"])
+    print("Quantization:", inp["quantization"])
+    print("Index:", inp["index"])
+    print()
 
-files = ["file1.csv", "file2.csv", "file3.csv", "file4.csv"]
+# Output details
+output_details = interpreter.get_output_details()
+print("\n--- OUTPUT DETAILS ---")
+for out in output_details:
+    print("Name:", out["name"])
+    print("Shape:", out["shape"])
+    print("Dtype:", out["dtype"])
+    print("Quantization:", out["quantization"])
+    print("Index:", out["index"])
+    print()
 
-df = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
-
-df.to_csv("combined.csv", index=False)
-
-print("Combined successfully!")
+# All tensor details (optional)
+print("\n--- TOTAL TENSORS ---")
+print("Total tensors:", len(interpreter.get_tensor_details()))
