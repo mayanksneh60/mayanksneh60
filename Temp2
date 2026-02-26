@@ -1,36 +1,133 @@
-import tensorflow as tf
-import numpy as np
+class YoloxTFLite(
+    private val interpreter: Interpreter,
+    private val inputSize: Int = 640,
+    private val numClasses: Int = 2,
+    private val confThreshold: Float = 0.3f,
+    private val nmsThreshold: Float = 0.45f
+) {
 
-MODEL_PATH = "yolox_model.tflite"
+    fun detect(bitmap: Bitmap): List<Detection> {
 
-# Load model
-interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
-interpreter.allocate_tensors()
+        val resized = Bitmap.createScaledBitmap(bitmap, inputSize, inputSize, true)
 
-print("\n===== MODEL DETAILS =====")
+        val inputBuffer = ByteBuffer.allocateDirect(1 * 3 * inputSize * inputSize * 4)
+        inputBuffer.order(ByteOrder.nativeOrder())
 
-# Input details
-input_details = interpreter.get_input_details()
-print("\n--- INPUT DETAILS ---")
-for inp in input_details:
-    print("Name:", inp["name"])
-    print("Shape:", inp["shape"])
-    print("Dtype:", inp["dtype"])
-    print("Quantization:", inp["quantization"])
-    print("Index:", inp["index"])
-    print()
+        // NCHW preprocessing
+        for (c in 0 until 3) {
+            for (y in 0 until inputSize) {
+                for (x in 0 until inputSize) {
+                    val pixel = resized.getPixel(x, y)
 
-# Output details
-output_details = interpreter.get_output_details()
-print("\n--- OUTPUT DETAILS ---")
-for out in output_details:
-    print("Name:", out["name"])
-    print("Shape:", out["shape"])
-    print("Dtype:", out["dtype"])
-    print("Quantization:", out["quantization"])
-    print("Index:", out["index"])
-    print()
+                    val value = when (c) {
+                        0 -> ((pixel shr 16 and 0xFF) / 255f)
+                        1 -> ((pixel shr 8 and 0xFF) / 255f)
+                        else -> ((pixel and 0xFF) / 255f)
+                    }
 
-# All tensor details (optional)
-print("\n--- TOTAL TENSORS ---")
-print("Total tensors:", len(interpreter.get_tensor_details()))
+                    inputBuffer.putFloat(value)
+                }
+            }
+        }
+
+        val output = Array(1) { Array(8400) { FloatArray(5 + numClasses) } }
+
+        interpreter.run(inputBuffer, output)
+
+        return postProcess(output[0], bitmap.width, bitmap.height)
+    }
+
+    private fun postProcess(
+        predictions: Array<FloatArray>,
+        originalWidth: Int,
+        originalHeight: Int
+    ): List<Detection> {
+
+        val detections = mutableListOf<Detection>()
+
+        for (pred in predictions) {
+
+            val cx = pred[0]
+            val cy = pred[1]
+            val w = pred[2]
+            val h = pred[3]
+            val obj = pred[4]
+
+            var bestClass = -1
+            var bestScore = 0f
+
+            for (c in 0 until numClasses) {
+                if (pred[5 + c] > bestScore) {
+                    bestScore = pred[5 + c]
+                    bestClass = c
+                }
+            }
+
+            val score = obj * bestScore
+            if (score < confThreshold) continue
+
+            val x1 = (cx - w / 2f) * originalWidth / inputSize
+            val y1 = (cy - h / 2f) * originalHeight / inputSize
+            val x2 = (cx + w / 2f) * originalWidth / inputSize
+            val y2 = (cy + h / 2f) * originalHeight / inputSize
+
+            detections.add(
+                Detection(
+                    classId = bestClass,
+                    score = score,
+                    box = RectF(x1, y1, x2, y2)
+                )
+            )
+        }
+
+        return classAwareNMS(detections)
+    }
+
+    private fun classAwareNMS(detections: List<Detection>): List<Detection> {
+
+        val finalDetections = mutableListOf<Detection>()
+
+        for (classId in 0 until numClasses) {
+
+            val classDetections = detections
+                .filter { it.classId == classId }
+                .sortedByDescending { it.score }
+                .toMutableList()
+
+            while (classDetections.isNotEmpty()) {
+
+                val best = classDetections.removeAt(0)
+                finalDetections.add(best)
+
+                val iterator = classDetections.iterator()
+
+                while (iterator.hasNext()) {
+                    val other = iterator.next()
+                    if (iou(best.box, other.box) > nmsThreshold) {
+                        iterator.remove()
+                    }
+                }
+            }
+        }
+
+        return finalDetections
+    }
+
+    private fun iou(a: RectF, b: RectF): Float {
+
+        val left = max(a.left, b.left)
+        val top = max(a.top, b.top)
+        val right = min(a.right, b.right)
+        val bottom = min(a.bottom, b.bottom)
+
+        val intersection =
+            max(0f, right - left) * max(0f, bottom - top)
+
+        val areaA = (a.right - a.left) * (a.bottom - a.top)
+        val areaB = (b.right - b.left) * (b.bottom - b.top)
+
+        val union = areaA + areaB - intersection
+
+        return if (union <= 0f) 0f else intersection / union
+    }
+}
