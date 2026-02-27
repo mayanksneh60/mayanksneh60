@@ -1,65 +1,75 @@
 import torch
 import torch.nn as nn
 import onnx
-import tensorflow as tf
-from yolox.exp import get_exp
 import onnxsim
+import tensorflow as tf
+import numpy as np
+from yolox.exp import get_exp
 
-# =============================
-# CONFIG
-# =============================
+# =====================================================
+# CONFIGURATION
+# =====================================================
 
 EXP_FILE = "exps/example/yolox_edittext_nano.py"
 CKPT_FILE = "YOLOX_outputs/yolox_edittext_nano/best_ckpt.pth"
+
 ONNX_FILE = "yolox_decode.onnx"
 ONNX_SIM_FILE = "yolox_decode_sim.onnx"
 TF_MODEL_DIR = "yolox_saved_model"
 TFLITE_FILE = "yolox_model.tflite"
+
 INPUT_SIZE = 640
 
-# =============================
-# LOAD MODEL
-# =============================
+# =====================================================
+# STEP 1 — LOAD TRAINED YOLOX MODEL
+# =====================================================
 
 print("Loading YOLOX model...")
+
 exp = get_exp(EXP_FILE, None)
 model = exp.get_model()
+
 ckpt = torch.load(CKPT_FILE, map_location="cpu")
 model.load_state_dict(ckpt["model"])
 model.eval()
 
+print("Model loaded successfully.")
 
-# =============================
-# WRAPPER WITH DECODE
-# =============================
+# Print strides (sanity check)
+print("Model strides:", model.head.strides)
+
+# =====================================================
+# STEP 2 — WRAP MODEL WITH DECODE
+# =====================================================
 
 class YOLOXDecodeWrapper(nn.Module):
-    def __init__(self, model, exp):
+    def __init__(self, model):
         super().__init__()
         self.model = model
-        self.strides = exp.strides
-        self.decode = True
 
     def forward(self, x):
         outputs = self.model(x)
 
-        # outputs[0] shape: [B, 8400, 5 + num_classes]
+        # YOLOX returns a list → take first element
+        outputs = outputs[0]
+
+        # Apply decode layer (VERY IMPORTANT)
         outputs = self.model.head.decode_outputs(
-            outputs[0], 
+            outputs,
             dtype=x.dtype
         )
 
         return outputs
 
 
-wrapped_model = YOLOXDecodeWrapper(model, exp)
+wrapped_model = YOLOXDecodeWrapper(model)
 wrapped_model.eval()
 
 dummy_input = torch.randn(1, 3, INPUT_SIZE, INPUT_SIZE)
 
-# =============================
-# EXPORT TO ONNX
-# =============================
+# =====================================================
+# STEP 3 — EXPORT TO ONNX
+# =====================================================
 
 print("Exporting ONNX with decode layer...")
 
@@ -70,38 +80,64 @@ torch.onnx.export(
     input_names=["input"],
     output_names=["output"],
     opset_version=11,
+    do_constant_folding=True
 )
 
-print("ONNX export complete.")
+print("ONNX export completed.")
 
-# =============================
-# SIMPLIFY ONNX
-# =============================
+# =====================================================
+# STEP 4 — SIMPLIFY ONNX
+# =====================================================
 
-print("Simplifying ONNX...")
+print("Simplifying ONNX model...")
+
 model_onnx = onnx.load(ONNX_FILE)
 model_sim, check = onnxsim.simplify(model_onnx)
-assert check, "ONNX simplification failed"
+
+assert check, "ONNX simplification failed!"
 onnx.save(model_sim, ONNX_SIM_FILE)
-print("ONNX simplified.")
 
-# =============================
-# ONNX → TF
-# =============================
+print("ONNX simplification completed.")
 
-print("Converting ONNX to TensorFlow...")
+# =====================================================
+# STEP 5 — VERIFY DECODE APPLIED
+# =====================================================
+
+print("Testing ONNX output...")
+
+import onnxruntime as ort
+
+session = ort.InferenceSession(ONNX_SIM_FILE)
+input_name = session.get_inputs()[0].name
+
+dummy = np.random.randn(1, 3, INPUT_SIZE, INPUT_SIZE).astype(np.float32)
+output = session.run(None, {input_name: dummy})
+
+print("Sample decoded box:", output[0][0][:4])
+
+# You should see values like:
+# [320, 410, 120, 85]
+# NOT small numbers like [5, 2, 12, 6]
+
+# =====================================================
+# STEP 6 — CONVERT ONNX → TENSORFLOW
+# =====================================================
+
+print("Converting ONNX to TensorFlow SavedModel...")
+
 from onnx_tf.backend import prepare
 
 onnx_model = onnx.load(ONNX_SIM_FILE)
 tf_rep = prepare(onnx_model)
 tf_rep.export_graph(TF_MODEL_DIR)
-print("SavedModel exported.")
 
-# =============================
-# TF → TFLite
-# =============================
+print("SavedModel exported successfully.")
 
-print("Converting to TFLite...")
+# =====================================================
+# STEP 7 — CONVERT TF → TFLITE
+# =====================================================
+
+print("Converting to TFLite (FP16)...")
 
 converter = tf.lite.TFLiteConverter.from_saved_model(TF_MODEL_DIR)
 converter.optimizations = [tf.lite.Optimize.DEFAULT]
@@ -112,5 +148,5 @@ tflite_model = converter.convert()
 with open(TFLITE_FILE, "wb") as f:
     f.write(tflite_model)
 
-print("TFLite model saved:", TFLITE_FILE)
+print("TFLite model saved at:", TFLITE_FILE)
 print("DONE ✅")
