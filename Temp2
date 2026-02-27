@@ -1,152 +1,187 @@
-import torch
-import torch.nn as nn
-import onnx
-import onnxsim
-import tensorflow as tf
-import numpy as np
-from yolox.exp import get_exp
+class YoloxTFLite(
+    private val interpreter: Interpreter,
+    private val inputSize: Int = 640,
+    private val numClasses: Int = 2,
+    private val confThreshold: Float = 0.3f,
+    private val nmsThreshold: Float = 0.45f
+) {
 
-# =====================================================
-# CONFIGURATION
-# =====================================================
+    data class LetterboxResult(
+        val bitmap: Bitmap,
+        val scale: Float,
+        val dx: Float,
+        val dy: Float
+    )
 
-EXP_FILE = "exps/example/yolox_edittext_nano.py"
-CKPT_FILE = "YOLOX_outputs/yolox_edittext_nano/best_ckpt.pth"
+    fun detect(bitmap: Bitmap): List<Detection> {
 
-ONNX_FILE = "yolox_decode.onnx"
-ONNX_SIM_FILE = "yolox_decode_sim.onnx"
-TF_MODEL_DIR = "yolox_saved_model"
-TFLITE_FILE = "yolox_model.tflite"
+        val letterbox = letterbox(bitmap)
+        val resized = letterbox.bitmap
 
-INPUT_SIZE = 640
+        val inputBuffer =
+            ByteBuffer.allocateDirect(1 * 3 * inputSize * inputSize * 4)
+        inputBuffer.order(ByteOrder.nativeOrder())
 
-# =====================================================
-# STEP 1 — LOAD TRAINED YOLOX MODEL
-# =====================================================
+        // NCHW
+        for (c in 0 until 3) {
+            for (y in 0 until inputSize) {
+                for (x in 0 until inputSize) {
+                    val pixel = resized.getPixel(x, y)
 
-print("Loading YOLOX model...")
+                    val value = when (c) {
+                        0 -> ((pixel shr 16 and 0xFF) / 255f)
+                        1 -> ((pixel shr 8 and 0xFF) / 255f)
+                        else -> ((pixel and 0xFF) / 255f)
+                    }
 
-exp = get_exp(EXP_FILE, None)
-model = exp.get_model()
+                    inputBuffer.putFloat(value)
+                }
+            }
+        }
 
-ckpt = torch.load(CKPT_FILE, map_location="cpu")
-model.load_state_dict(ckpt["model"])
-model.eval()
+        val output = Array(1) { Array(8400) { FloatArray(5 + numClasses) } }
 
-print("Model loaded successfully.")
+        interpreter.run(inputBuffer, output)
 
-# Print strides (sanity check)
-print("Model strides:", model.head.strides)
+        return postProcess(
+            output[0],
+            bitmap.width,
+            bitmap.height,
+            letterbox.scale,
+            letterbox.dx,
+            letterbox.dy
+        )
+    }
 
-# =====================================================
-# STEP 2 — WRAP MODEL WITH DECODE
-# =====================================================
+    private fun letterbox(src: Bitmap): LetterboxResult {
 
-class YOLOXDecodeWrapper(nn.Module):
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-
-    def forward(self, x):
-        outputs = self.model(x)
-
-        # YOLOX returns a list → take first element
-        outputs = outputs[0]
-
-        # Apply decode layer (VERY IMPORTANT)
-        outputs = self.model.head.decode_outputs(
-            outputs,
-            dtype=x.dtype
+        val scale = min(
+            inputSize.toFloat() / src.width,
+            inputSize.toFloat() / src.height
         )
 
-        return outputs
+        val newW = (src.width * scale).toInt()
+        val newH = (src.height * scale).toInt()
 
+        val resized = Bitmap.createScaledBitmap(src, newW, newH, true)
 
-wrapped_model = YOLOXDecodeWrapper(model)
-wrapped_model.eval()
+        val padded = Bitmap.createBitmap(
+            inputSize,
+            inputSize,
+            Bitmap.Config.ARGB_8888
+        )
 
-dummy_input = torch.randn(1, 3, INPUT_SIZE, INPUT_SIZE)
+        val canvas = android.graphics.Canvas(padded)
+        canvas.drawColor(android.graphics.Color.BLACK)
 
-# =====================================================
-# STEP 3 — EXPORT TO ONNX
-# =====================================================
+        val dx = (inputSize - newW) / 2f
+        val dy = (inputSize - newH) / 2f
 
-print("Exporting ONNX with decode layer...")
+        canvas.drawBitmap(resized, dx, dy, null)
 
-torch.onnx.export(
-    wrapped_model,
-    dummy_input,
-    ONNX_FILE,
-    input_names=["input"],
-    output_names=["output"],
-    opset_version=11,
-    do_constant_folding=True
-)
+        return LetterboxResult(padded, scale, dx, dy)
+    }
 
-print("ONNX export completed.")
+    private fun postProcess(
+        predictions: Array<FloatArray>,
+        originalWidth: Int,
+        originalHeight: Int,
+        scale: Float,
+        dx: Float,
+        dy: Float
+    ): List<Detection> {
 
-# =====================================================
-# STEP 4 — SIMPLIFY ONNX
-# =====================================================
+        val detections = mutableListOf<Detection>()
 
-print("Simplifying ONNX model...")
+        for (pred in predictions) {
 
-model_onnx = onnx.load(ONNX_FILE)
-model_sim, check = onnxsim.simplify(model_onnx)
+            val cx = pred[0]
+            val cy = pred[1]
+            val w = pred[2]
+            val h = pred[3]
+            val obj = pred[4]
 
-assert check, "ONNX simplification failed!"
-onnx.save(model_sim, ONNX_SIM_FILE)
+            var bestClass = -1
+            var bestScore = 0f
 
-print("ONNX simplification completed.")
+            for (c in 0 until numClasses) {
+                if (pred[5 + c] > bestScore) {
+                    bestScore = pred[5 + c]
+                    bestClass = c
+                }
+            }
 
-# =====================================================
-# STEP 5 — VERIFY DECODE APPLIED
-# =====================================================
+            val score = obj * bestScore
+            if (score < confThreshold) continue
 
-print("Testing ONNX output...")
+            var x1 = cx - w / 2f
+            var y1 = cy - h / 2f
+            var x2 = cx + w / 2f
+            var y2 = cy + h / 2f
 
-import onnxruntime as ort
+            // remove letterbox padding
+            x1 = (x1 - dx) / scale
+            y1 = (y1 - dy) / scale
+            x2 = (x2 - dx) / scale
+            y2 = (y2 - dy) / scale
 
-session = ort.InferenceSession(ONNX_SIM_FILE)
-input_name = session.get_inputs()[0].name
+            detections.add(
+                Detection(
+                    classId = bestClass,
+                    score = score,
+                    box = RectF(x1, y1, x2, y2)
+                )
+            )
+        }
 
-dummy = np.random.randn(1, 3, INPUT_SIZE, INPUT_SIZE).astype(np.float32)
-output = session.run(None, {input_name: dummy})
+        return classAwareNMS(detections)
+    }
 
-print("Sample decoded box:", output[0][0][:4])
+    private fun classAwareNMS(detections: List<Detection>): List<Detection> {
 
-# You should see values like:
-# [320, 410, 120, 85]
-# NOT small numbers like [5, 2, 12, 6]
+        val finalDetections = mutableListOf<Detection>()
 
-# =====================================================
-# STEP 6 — CONVERT ONNX → TENSORFLOW
-# =====================================================
+        for (classId in 0 until numClasses) {
 
-print("Converting ONNX to TensorFlow SavedModel...")
+            val classDetections = detections
+                .filter { it.classId == classId }
+                .sortedByDescending { it.score }
+                .toMutableList()
 
-from onnx_tf.backend import prepare
+            while (classDetections.isNotEmpty()) {
 
-onnx_model = onnx.load(ONNX_SIM_FILE)
-tf_rep = prepare(onnx_model)
-tf_rep.export_graph(TF_MODEL_DIR)
+                val best = classDetections.removeAt(0)
+                finalDetections.add(best)
 
-print("SavedModel exported successfully.")
+                val iterator = classDetections.iterator()
 
-# =====================================================
-# STEP 7 — CONVERT TF → TFLITE
-# =====================================================
+                while (iterator.hasNext()) {
+                    val other = iterator.next()
+                    if (iou(best.box, other.box) > nmsThreshold) {
+                        iterator.remove()
+                    }
+                }
+            }
+        }
 
-print("Converting to TFLite (FP16)...")
+        return finalDetections
+    }
 
-converter = tf.lite.TFLiteConverter.from_saved_model(TF_MODEL_DIR)
-converter.optimizations = [tf.lite.Optimize.DEFAULT]
-converter.target_spec.supported_types = [tf.float16]
+    private fun iou(a: RectF, b: RectF): Float {
 
-tflite_model = converter.convert()
+        val left = max(a.left, b.left)
+        val top = max(a.top, b.top)
+        val right = min(a.right, b.right)
+        val bottom = min(a.bottom, b.bottom)
 
-with open(TFLITE_FILE, "wb") as f:
-    f.write(tflite_model)
+        val intersection =
+            max(0f, right - left) * max(0f, bottom - top)
 
-print("TFLite model saved at:", TFLITE_FILE)
-print("DONE ✅")
+        val areaA = (a.right - a.left) * (a.bottom - a.top)
+        val areaB = (b.right - b.left) * (b.bottom - b.top)
+
+        val union = areaA + areaB - intersection
+
+        return if (union <= 0f) 0f else intersection / union
+    }
+}
