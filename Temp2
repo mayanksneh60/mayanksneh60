@@ -1,240 +1,112 @@
-import android.graphics.*
-import org.tensorflow.lite.Interpreter
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import kotlin.math.*
+import os
+import cv2
+import torch
+import numpy as np
+from yolox.exp import get_exp
+from yolox.utils import postprocess
+from yolox.data.data_augment import preproc
 
-data class Detection(
-    val classId: Int,
-    val score: Float,
-    val box: RectF
-)
+# ==========================
+# CONFIGURATION
+# ==========================
 
-class YoloxTFLite(
-    private val interpreter: Interpreter,
-    private val inputSize: Int = 640,
-    private val numClasses: Int = 2,
-    private val confThreshold: Float = 0.3f,
-    private val nmsThreshold: Float = 0.45f
-) {
+EXP_FILE = "exps/example/yolox_edittext_nano.py"
+CKPT_FILE = "YOLOX_outputs/yolox_edittext_nano/best_ckpt.pth"
+IMAGE_FOLDER = "images_to_test"
+INPUT_SIZE = (640, 640)
+CONF_THRES = 0.3
+NMS_THRES = 0.45
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-    fun detect(bitmap: Bitmap): List<Detection> {
+CLASS_NAMES = ["focused_edittext", "normal_edittext"]
 
-        val originalW = bitmap.width
-        val originalH = bitmap.height
+# ==========================
+# LOAD MODEL
+# ==========================
 
-        // Letterbox resize
-        val letterboxResult = letterbox(bitmap, inputSize)
-        val resizedBitmap = letterboxResult.first
-        val scale = letterboxResult.second
-        val padX = letterboxResult.third.first
-        val padY = letterboxResult.third.second
+print("Loading model...")
 
-        val inputBuffer =
-            ByteBuffer.allocateDirect(1 * 3 * inputSize * inputSize * 4)
-        inputBuffer.order(ByteOrder.nativeOrder())
-        inputBuffer.rewind()
+exp = get_exp(EXP_FILE, None)
+model = exp.get_model()
+model.to(DEVICE)
 
-        // NCHW
-        for (c in 0 until 3) {
-            for (y in 0 until inputSize) {
-                for (x in 0 until inputSize) {
+ckpt = torch.load(CKPT_FILE, map_location=DEVICE)
+model.load_state_dict(ckpt["model"])
+model.eval()
 
-                    val pixel = resizedBitmap.getPixel(x, y)
+print("Model loaded.")
 
-                    val value = when (c) {
-                        0 -> ((pixel shr 16 and 0xFF) / 255f)
-                        1 -> ((pixel shr 8 and 0xFF) / 255f)
-                        else -> ((pixel and 0xFF) / 255f)
-                    }
+# ==========================
+# INFERENCE LOOP
+# ==========================
 
-                    inputBuffer.putFloat(value)
-                }
-            }
-        }
+image_files = [
+    f for f in os.listdir(IMAGE_FOLDER)
+    if f.lower().endswith((".jpg", ".png", ".jpeg"))
+]
 
-        val output =
-            Array(1) { Array(8400) { FloatArray(5 + numClasses) } }
+for img_name in image_files:
 
-        interpreter.run(inputBuffer, output)
+    img_path = os.path.join(IMAGE_FOLDER, img_name)
+    print(f"Inferencing: {img_name}")
 
-        return postProcess(
-            output[0],
-            originalW,
-            originalH,
-            scale,
-            padX,
-            padY
-        )
-    }
+    img = cv2.imread(img_path)
+    orig_img = img.copy()
+    height, width = img.shape[:2]
 
-    // ------------------------------------------------------------
-    // LETTERBOX RESIZE
-    // ------------------------------------------------------------
+    # Preprocess (letterbox + normalization)
+    img_processed, ratio = preproc(img, INPUT_SIZE)
+    img_tensor = torch.from_numpy(img_processed).unsqueeze(0).float().to(DEVICE)
 
-    private fun letterbox(
-        bitmap: Bitmap,
-        size: Int
-    ): Triple<Bitmap, Float, Pair<Float, Float>> {
-
-        val width = bitmap.width
-        val height = bitmap.height
-
-        val scale = min(
-            size / width.toFloat(),
-            size / height.toFloat()
+    with torch.no_grad():
+        outputs = model(img_tensor)
+        outputs = postprocess(
+            outputs,
+            exp.num_classes,
+            CONF_THRES,
+            NMS_THRES
         )
 
-        val newW = (width * scale).toInt()
-        val newH = (height * scale).toInt()
+    if outputs[0] is None:
+        print("No detections")
+        cv2.imshow("Result", orig_img)
+        cv2.waitKey(0)
+        continue
 
-        val resized = Bitmap.createScaledBitmap(
-            bitmap,
-            newW,
-            newH,
-            true
+    detections = outputs[0].cpu().numpy()
+
+    for det in detections:
+        x1, y1, x2, y2, obj_conf, class_conf, class_id = det
+
+        # Rescale boxes to original size
+        x1 /= ratio
+        y1 /= ratio
+        x2 /= ratio
+        y2 /= ratio
+
+        x1 = int(x1)
+        y1 = int(y1)
+        x2 = int(x2)
+        y2 = int(y2)
+
+        score = obj_conf * class_conf
+        label = CLASS_NAMES[int(class_id)]
+
+        cv2.rectangle(orig_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(
+            orig_img,
+            f"{label}: {score:.2f}",
+            (x1, y1 - 5),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 0),
+            2
         )
 
-        val padded =
-            Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    cv2.imshow("Result", orig_img)
+    key = cv2.waitKey(0)
 
-        val canvas = Canvas(padded)
-        canvas.drawColor(Color.BLACK)
+    if key == 27:  # ESC to exit
+        break
 
-        val padX = (size - newW) / 2f
-        val padY = (size - newH) / 2f
-
-        canvas.drawBitmap(resized, padX, padY, null)
-
-        return Triple(padded, scale, Pair(padX, padY))
-    }
-
-    // ------------------------------------------------------------
-    // POST PROCESS
-    // ------------------------------------------------------------
-
-    private fun postProcess(
-        predictions: Array<FloatArray>,
-        originalW: Int,
-        originalH: Int,
-        scale: Float,
-        padX: Float,
-        padY: Float
-    ): List<Detection> {
-
-        val detections = mutableListOf<Detection>()
-
-        for (pred in predictions) {
-
-            var x1 = pred[0]
-            var y1 = pred[1]
-            var x2 = pred[2]
-            var y2 = pred[3]
-            val obj = pred[4]
-
-            if (!x1.isFinite() || !y1.isFinite()
-                || !x2.isFinite() || !y2.isFinite()
-            ) continue
-
-            var bestClass = -1
-            var bestScore = 0f
-
-            for (c in 0 until numClasses) {
-                val score = obj * pred[5 + c]
-                if (score > bestScore) {
-                    bestScore = score
-                    bestClass = c
-                }
-            }
-
-            if (bestScore < confThreshold) continue
-
-            // Reverse letterbox transform
-            x1 = (x1 - padX) / scale
-            y1 = (y1 - padY) / scale
-            x2 = (x2 - padX) / scale
-            y2 = (y2 - padY) / scale
-
-            // Clamp to image bounds
-            x1 = max(0f, min(x1, originalW.toFloat()))
-            y1 = max(0f, min(y1, originalH.toFloat()))
-            x2 = max(0f, min(x2, originalW.toFloat()))
-            y2 = max(0f, min(y2, originalH.toFloat()))
-
-            if (x2 <= x1 || y2 <= y1) continue
-
-            detections.add(
-                Detection(
-                    classId = bestClass,
-                    score = bestScore,
-                    box = RectF(x1, y1, x2, y2)
-                )
-            )
-        }
-
-        return classAwareNMS(detections)
-    }
-
-    // ------------------------------------------------------------
-    // CLASS-AWARE NMS
-    // ------------------------------------------------------------
-
-    private fun classAwareNMS(
-        detections: List<Detection>
-    ): List<Detection> {
-
-        val finalDetections = mutableListOf<Detection>()
-
-        for (classId in 0 until numClasses) {
-
-            val classDetections = detections
-                .filter { it.classId == classId }
-                .sortedByDescending { it.score }
-                .toMutableList()
-
-            while (classDetections.isNotEmpty()) {
-
-                val best = classDetections.removeAt(0)
-                finalDetections.add(best)
-
-                val iterator = classDetections.iterator()
-
-                while (iterator.hasNext()) {
-                    val other = iterator.next()
-                    if (iou(best.box, other.box) > nmsThreshold) {
-                        iterator.remove()
-                    }
-                }
-            }
-        }
-
-        return finalDetections
-    }
-
-    // ------------------------------------------------------------
-    // IOU
-    // ------------------------------------------------------------
-
-    private fun iou(a: RectF, b: RectF): Float {
-
-        val left = max(a.left, b.left)
-        val top = max(a.top, b.top)
-        val right = min(a.right, b.right)
-        val bottom = min(a.bottom, b.bottom)
-
-        val intersection =
-            max(0f, right - left) *
-                    max(0f, bottom - top)
-
-        val areaA = (a.right - a.left) *
-                (a.bottom - a.top)
-
-        val areaB = (b.right - b.left) *
-                (b.bottom - b.top)
-
-        val union = areaA + areaB - intersection
-
-        return if (union <= 0f) 0f
-        else intersection / union
-    }
-}
+cv2.destroyAllWindows()
