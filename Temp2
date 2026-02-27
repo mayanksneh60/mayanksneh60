@@ -1,190 +1,163 @@
-package com.yourpackage.detector
-
-import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.RectF
-import android.util.Log
 import org.tensorflow.lite.Interpreter
-import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.channels.FileChannel
-import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 
+data class Detection(
+    val classId: Int,
+    val score: Float,
+    val box: RectF
+)
+
 class YoloxTFLite(
-    context: Context,
-    modelPath: String
+    private val interpreter: Interpreter,
+    private val inputSize: Int = 640,
+    private val numClasses: Int = 2,
+    private val confThreshold: Float = 0.3f,
+    private val nmsThreshold: Float = 0.45f
 ) {
 
-    data class Detection(
-        val box: RectF,
-        val score: Float,
-        val classId: Int
-    )
-
-    private val interpreter: Interpreter
-    private val inputSize = 640
-    private val numClasses = 2
-    private val strides = intArrayOf(8, 16, 32)
-
-    init {
-        interpreter = Interpreter(loadModelFile(context, modelPath))
-    }
-
-    // ==============================
-    // PUBLIC DETECT FUNCTION
-    // ==============================
     fun detect(bitmap: Bitmap): List<Detection> {
 
+        val originalW = bitmap.width
+        val originalH = bitmap.height
+
         val resized = Bitmap.createScaledBitmap(bitmap, inputSize, inputSize, true)
-        val input = preprocess(resized)
 
-        val output = Array(1) { Array(8400) { FloatArray(5 + numClasses) } }
+        val inputBuffer =
+            ByteBuffer.allocateDirect(1 * 3 * inputSize * inputSize * 4)
+        inputBuffer.order(ByteOrder.nativeOrder())
+        inputBuffer.rewind()
 
-        interpreter.run(input, output)
+        // NCHW format
+        for (c in 0 until 3) {
+            for (y in 0 until inputSize) {
+                for (x in 0 until inputSize) {
 
-        val detections = decode(output[0], bitmap.width, bitmap.height)
+                    val pixel = resized.getPixel(x, y)
 
-        return nms(detections, 0.45f)
-    }
+                    val value = when (c) {
+                        0 -> ((pixel shr 16 and 0xFF) / 255f)
+                        1 -> ((pixel shr 8 and 0xFF) / 255f)
+                        else -> ((pixel and 0xFF) / 255f)
+                    }
 
-    // ==============================
-    // PREPROCESS
-    // ==============================
-    private fun preprocess(bitmap: Bitmap): ByteBuffer {
-        val buffer = ByteBuffer.allocateDirect(1 * 3 * inputSize * inputSize * 4)
-        buffer.order(ByteOrder.nativeOrder())
-
-        val intValues = IntArray(inputSize * inputSize)
-        bitmap.getPixels(intValues, 0, inputSize, 0, 0, inputSize, inputSize)
-
-        for (pixel in intValues) {
-            val r = ((pixel shr 16) and 0xFF) / 255f
-            val g = ((pixel shr 8) and 0xFF) / 255f
-            val b = (pixel and 0xFF) / 255f
-
-            buffer.putFloat(r)
-            buffer.putFloat(g)
-            buffer.putFloat(b)
+                    inputBuffer.putFloat(value)
+                }
+            }
         }
 
-        buffer.rewind()
-        return buffer
+        val output =
+            Array(1) { Array(8400) { FloatArray(5 + numClasses) } }
+
+        interpreter.run(inputBuffer, output)
+
+        return postProcess(
+            output[0],
+            originalW,
+            originalH
+        )
     }
 
-    // ==============================
-    // DECODE YOLOX OUTPUT
-    // ==============================
-    private fun decode(
-        output: Array<FloatArray>,
+    private fun postProcess(
+        predictions: Array<FloatArray>,
         originalW: Int,
         originalH: Int
-    ): MutableList<Detection> {
+    ): List<Detection> {
 
         val detections = mutableListOf<Detection>()
-        val grids = generateGrids()
 
-        for (i in 0 until 8400) {
+        val scaleX = originalW / inputSize.toFloat()
+        val scaleY = originalH / inputSize.toFloat()
 
-            val tx = output[i][0]
-            val ty = output[i][1]
-            val tw = output[i][2]
-            val th = output[i][3]
-            val obj = sigmoid(output[i][4])
+        for (pred in predictions) {
 
-            val (gridX, gridY, stride) = grids[i]
+            var x1 = pred[0]
+            var y1 = pred[1]
+            var x2 = pred[2]
+            var y2 = pred[3]
+            val obj = pred[4]
 
-            val cx = (tx + gridX) * stride
-            val cy = (ty + gridY) * stride
-            val w = exp(tw) * stride
-            val h = exp(th) * stride
+            // Skip invalid boxes
+            if (!x1.isFinite() || !y1.isFinite() ||
+                !x2.isFinite() || !y2.isFinite()
+            ) continue
 
-            val x1 = cx - w / 2f
-            val y1 = cy - h / 2f
-            val x2 = cx + w / 2f
-            val y2 = cy + h / 2f
-
-            var bestClass = 0
+            var bestClass = -1
             var bestScore = 0f
 
             for (c in 0 until numClasses) {
-                val classScore = sigmoid(output[i][5 + c])
-                val score = obj * classScore
+                val score = obj * pred[5 + c]
                 if (score > bestScore) {
                     bestScore = score
                     bestClass = c
                 }
             }
 
-            if (bestScore > 0.3f) {
+            if (bestScore < confThreshold) continue
 
-                // Scale back to original image
-                val scaleX = originalW / inputSize.toFloat()
-                val scaleY = originalH / inputSize.toFloat()
+            // Scale back to original image
+            x1 *= scaleX
+            y1 *= scaleY
+            x2 *= scaleX
+            y2 *= scaleY
 
-                val rect = RectF(
-                    x1 * scaleX,
-                    y1 * scaleY,
-                    x2 * scaleX,
-                    y2 * scaleY
+            // Clamp to image bounds
+            x1 = max(0f, min(x1, originalW.toFloat()))
+            y1 = max(0f, min(y1, originalH.toFloat()))
+            x2 = max(0f, min(x2, originalW.toFloat()))
+            y2 = max(0f, min(y2, originalH.toFloat()))
+
+            if (x2 <= x1 || y2 <= y1) continue
+
+            detections.add(
+                Detection(
+                    classId = bestClass,
+                    score = bestScore,
+                    box = RectF(x1, y1, x2, y2)
                 )
-
-                detections.add(Detection(rect, bestScore, bestClass))
-            }
+            )
         }
 
-        return detections
+        return classAwareNMS(detections)
     }
 
-    // ==============================
-    // GRID GENERATION
-    // ==============================
-    private fun generateGrids(): List<Triple<Int, Int, Int>> {
+    private fun classAwareNMS(
+        detections: List<Detection>
+    ): List<Detection> {
 
-        val grids = mutableListOf<Triple<Int, Int, Int>>()
+        val finalDetections = mutableListOf<Detection>()
 
-        for (stride in strides) {
-            val numGrid = inputSize / stride
+        for (classId in 0 until numClasses) {
 
-            for (y in 0 until numGrid) {
-                for (x in 0 until numGrid) {
-                    grids.add(Triple(x, y, stride))
+            val classDetections = detections
+                .filter { it.classId == classId }
+                .sortedByDescending { it.score }
+                .toMutableList()
+
+            while (classDetections.isNotEmpty()) {
+
+                val best = classDetections.removeAt(0)
+                finalDetections.add(best)
+
+                val iterator = classDetections.iterator()
+
+                while (iterator.hasNext()) {
+                    val other = iterator.next()
+                    if (iou(best.box, other.box) > nmsThreshold) {
+                        iterator.remove()
+                    }
                 }
             }
         }
 
-        return grids
-    }
-
-    // ==============================
-    // NON MAX SUPPRESSION
-    // ==============================
-    private fun nms(
-        detections: List<Detection>,
-        iouThreshold: Float
-    ): List<Detection> {
-
-        val result = mutableListOf<Detection>()
-        val sorted = detections.sortedByDescending { it.score }.toMutableList()
-
-        while (sorted.isNotEmpty()) {
-            val best = sorted.removeAt(0)
-            result.add(best)
-
-            sorted.removeAll {
-                iou(best.box, it.box) > iouThreshold
-            }
-        }
-
-        return result
+        return finalDetections
     }
 
     private fun iou(a: RectF, b: RectF): Float {
-
-        val areaA = (a.right - a.left) * (a.bottom - a.top)
-        val areaB = (b.right - b.left) * (b.bottom - b.top)
 
         val left = max(a.left, b.left)
         val top = max(a.top, b.top)
@@ -192,26 +165,18 @@ class YoloxTFLite(
         val bottom = min(a.bottom, b.bottom)
 
         val intersection =
-            max(0f, right - left) * max(0f, bottom - top)
+            max(0f, right - left) *
+                    max(0f, bottom - top)
 
-        return intersection / (areaA + areaB - intersection + 1e-6f)
-    }
+        val areaA = (a.right - a.left) *
+                (a.bottom - a.top)
 
-    // ==============================
-    // UTIL
-    // ==============================
-    private fun sigmoid(x: Float): Float {
-        return 1f / (1f + exp(-x))
-    }
+        val areaB = (b.right - b.left) *
+                (b.bottom - b.top)
 
-    private fun loadModelFile(context: Context, modelPath: String): ByteBuffer {
-        val fileDescriptor = context.assets.openFd(modelPath)
-        val inputStream = FileInputStream(fileDescriptor.fileDescriptor)
-        val fileChannel = inputStream.channel
-        return fileChannel.map(
-            FileChannel.MapMode.READ_ONLY,
-            fileDescriptor.startOffset,
-            fileDescriptor.declaredLength
-        )
+        val union = areaA + areaB - intersection
+
+        return if (union <= 0f) 0f
+        else intersection / union
     }
 }
