@@ -1,59 +1,130 @@
-output_dir = "output_results"
-os.makedirs(output_dir, exist_ok=True)
+import torch
+import numpy as np
+import cv2
+import os
 
-for img_name in image_files:
+# =========================
+# CONFIG
+# =========================
 
-    img_path = os.path.join(IMAGE_FOLDER, img_name)
-    print(f"Inferencing: {img_name}")
+MODEL_TYPE = "pth"   # "pth" or "onnx" or "tflite"
+IMAGE_PATH = "test.jpg"
+INPUT_SIZE = 640
 
-    img = cv2.imread(img_path)
-    orig_img = img.copy()
-    height, width = img.shape[:2]
+EXP_FILE = "exps/example/yolox_edittext_nano.py"
+CKPT_FILE = "YOLOX_outputs/yolox_edittext_nano/best_ckpt.pth"
+ONNX_FILE = "yolox_model.onnx"
+TFLITE_FILE = "yolox_model.tflite"
 
-    img_processed, ratio = preproc(img, INPUT_SIZE)
-    img_tensor = torch.from_numpy(img_processed).unsqueeze(0).float().to(DEVICE)
+# =========================
+# LOAD IMAGE
+# =========================
+
+img = cv2.imread(IMAGE_PATH)
+img_resized = cv2.resize(img, (INPUT_SIZE, INPUT_SIZE))
+img_input = img_resized.astype(np.float32) / 255.0
+img_input = np.transpose(img_input, (2, 0, 1))  # HWC → CHW
+img_input = np.expand_dims(img_input, 0)
+
+print("Input shape:", img_input.shape)
+
+# =========================
+# PTH CHECK
+# =========================
+
+if MODEL_TYPE == "pth":
+    from yolox.exp import get_exp
+
+    print("\n=== Testing PTH Model ===")
+
+    exp = get_exp(EXP_FILE, None)
+    model = exp.get_model()
+    ckpt = torch.load(CKPT_FILE, map_location="cpu")
+    model.load_state_dict(ckpt["model"])
+    model.eval()
 
     with torch.no_grad():
-        outputs = model(img_tensor)
-        outputs = postprocess(
-            outputs,
-            exp.num_classes,
-            CONF_THRES,
-            NMS_THRES
-        )
+        output = model(torch.from_numpy(img_input))
+    
+    output = output[0].numpy()
 
-    if outputs[0] is None:
-        print("No detections")
-        cv2.imwrite(os.path.join(output_dir, img_name), orig_img)
-        continue
+# =========================
+# ONNX CHECK
+# =========================
 
-    detections = outputs[0].cpu().numpy()
+elif MODEL_TYPE == "onnx":
+    print("\n=== Testing ONNX Model ===")
 
-    for det in detections:
-        x1, y1, x2, y2, obj_conf, class_conf, class_id = det
+    import onnxruntime as ort
+    session = ort.InferenceSession(ONNX_FILE)
+    input_name = session.get_inputs()[0].name
+    output = session.run(None, {input_name: img_input})[0][0]
 
-        x1 /= ratio
-        y1 /= ratio
-        x2 /= ratio
-        y2 /= ratio
+# =========================
+# TFLITE CHECK
+# =========================
 
-        x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
-        score = obj_conf * class_conf
-        label = CLASS_NAMES[int(class_id)]
+elif MODEL_TYPE == "tflite":
+    print("\n=== Testing TFLite Model ===")
 
-        cv2.rectangle(orig_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.putText(
-            orig_img,
-            f"{label}: {score:.2f}",
-            (x1, y1 - 5),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 255, 0),
-            2
-        )
+    import tensorflow as tf
+    interpreter = tf.lite.Interpreter(model_path=TFLITE_FILE)
+    interpreter.allocate_tensors()
 
-    save_path = os.path.join(output_dir, img_name)
-    cv2.imwrite(save_path, orig_img)
-    print(f"Saved: {save_path}")
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
 
-print("Inference complete.")
+    print("Input details:", input_details)
+    print("Output details:", output_details)
+
+    interpreter.set_tensor(input_details[0]["index"], img_input.astype(np.float32))
+    interpreter.invoke()
+    output = interpreter.get_tensor(output_details[0]["index"])[0]
+
+else:
+    raise ValueError("Invalid MODEL_TYPE")
+
+# =========================
+# DIAGNOSTICS
+# =========================
+
+print("\n=== OUTPUT DIAGNOSTICS ===")
+
+print("Output shape:", output.shape)
+
+print("Min value:", np.min(output))
+print("Max value:", np.max(output))
+print("Mean value:", np.mean(output))
+
+print("Contains NaN:", np.isnan(output).any())
+print("Contains Inf:", np.isinf(output).any())
+
+print("\nFirst 5 predictions:")
+for i in range(5):
+    print(output[i])
+
+# =========================
+# DETECTION TYPE CHECK
+# =========================
+
+if output.shape[1] >= 7:
+    print("\nLikely format: [x1, y1, x2, y2, obj, class0, class1...]")
+elif output.shape[1] == 6:
+    print("\nLikely format: [cx, cy, w, h, obj, class]")
+else:
+    print("\nUnknown format. Likely decode layer missing.")
+
+# =========================
+# SANITY CHECK BOXES
+# =========================
+
+valid_boxes = 0
+
+for row in output:
+    x1, y1, x2, y2 = row[0], row[1], row[2], row[3]
+    if x2 > x1 and y2 > y1:
+        valid_boxes += 1
+
+print("\nValid box count:", valid_boxes)
+
+print("\nDiagnostics complete.")
