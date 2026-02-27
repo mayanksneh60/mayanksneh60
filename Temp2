@@ -1,10 +1,8 @@
-import android.graphics.Bitmap
-import android.graphics.RectF
+import android.graphics.*
 import org.tensorflow.lite.Interpreter
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import kotlin.math.max
-import kotlin.math.min
+import kotlin.math.*
 
 data class Detection(
     val classId: Int,
@@ -25,26 +23,26 @@ class YoloxTFLite(
         val originalW = bitmap.width
         val originalH = bitmap.height
 
-        val resized = Bitmap.createScaledBitmap(bitmap, inputSize, inputSize, true)
+        // 🔥 Letterbox resize
+        val (resizedBitmap, scale, padX, padY) =
+            letterbox(bitmap, inputSize)
 
         val inputBuffer =
             ByteBuffer.allocateDirect(1 * 3 * inputSize * inputSize * 4)
         inputBuffer.order(ByteOrder.nativeOrder())
         inputBuffer.rewind()
 
-        // NCHW format
+        // NCHW
         for (c in 0 until 3) {
             for (y in 0 until inputSize) {
                 for (x in 0 until inputSize) {
-
-                    val pixel = resized.getPixel(x, y)
+                    val pixel = resizedBitmap.getPixel(x, y)
 
                     val value = when (c) {
                         0 -> ((pixel shr 16 and 0xFF) / 255f)
                         1 -> ((pixel shr 8 and 0xFF) / 255f)
                         else -> ((pixel and 0xFF) / 255f)
                     }
-
                     inputBuffer.putFloat(value)
                 }
             }
@@ -58,20 +56,60 @@ class YoloxTFLite(
         return postProcess(
             output[0],
             originalW,
-            originalH
+            originalH,
+            scale,
+            padX,
+            padY
         )
+    }
+
+    private fun letterbox(
+        bitmap: Bitmap,
+        size: Int
+    ): Quadruple<Bitmap, Float, Float, Float> {
+
+        val width = bitmap.width
+        val height = bitmap.height
+
+        val scale = min(
+            size / width.toFloat(),
+            size / height.toFloat()
+        )
+
+        val newW = (width * scale).toInt()
+        val newH = (height * scale).toInt()
+
+        val resized = Bitmap.createScaledBitmap(
+            bitmap,
+            newW,
+            newH,
+            true
+        )
+
+        val padded =
+            Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+
+        val canvas = Canvas(padded)
+        canvas.drawColor(Color.BLACK)
+
+        val padX = (size - newW) / 2f
+        val padY = (size - newH) / 2f
+
+        canvas.drawBitmap(resized, padX, padY, null)
+
+        return Quadruple(padded, scale, padX, padY)
     }
 
     private fun postProcess(
         predictions: Array<FloatArray>,
         originalW: Int,
-        originalH: Int
+        originalH: Int,
+        scale: Float,
+        padX: Float,
+        padY: Float
     ): List<Detection> {
 
         val detections = mutableListOf<Detection>()
-
-        val scaleX = originalW / inputSize.toFloat()
-        val scaleY = originalH / inputSize.toFloat()
 
         for (pred in predictions) {
 
@@ -81,9 +119,8 @@ class YoloxTFLite(
             var y2 = pred[3]
             val obj = pred[4]
 
-            // Skip invalid boxes
-            if (!x1.isFinite() || !y1.isFinite() ||
-                !x2.isFinite() || !y2.isFinite()
+            if (!x1.isFinite() || !y1.isFinite()
+                || !x2.isFinite() || !y2.isFinite()
             ) continue
 
             var bestClass = -1
@@ -99,13 +136,13 @@ class YoloxTFLite(
 
             if (bestScore < confThreshold) continue
 
-            // Scale back to original image
-            x1 *= scaleX
-            y1 *= scaleY
-            x2 *= scaleX
-            y2 *= scaleY
+            // 🔥 Reverse letterbox transform
+            x1 = (x1 - padX) / scale
+            y1 = (y1 - padY) / scale
+            x2 = (x2 - padX) / scale
+            y2 = (y2 - padY) / scale
 
-            // Clamp to image bounds
+            // Clamp
             x1 = max(0f, min(x1, originalW.toFloat()))
             y1 = max(0f, min(y1, originalH.toFloat()))
             x2 = max(0f, min(x2, originalW.toFloat()))
