@@ -1,49 +1,5 @@
-import os
-import cv2
-import torch
-import numpy as np
-from yolox.exp import get_exp
-from yolox.utils import postprocess
-from yolox.data.data_augment import preproc
-
-# ==========================
-# CONFIGURATION
-# ==========================
-
-EXP_FILE = "exps/example/yolox_edittext_nano.py"
-CKPT_FILE = "YOLOX_outputs/yolox_edittext_nano/best_ckpt.pth"
-IMAGE_FOLDER = "images_to_test"
-INPUT_SIZE = (640, 640)
-CONF_THRES = 0.3
-NMS_THRES = 0.45
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-CLASS_NAMES = ["focused_edittext", "normal_edittext"]
-
-# ==========================
-# LOAD MODEL
-# ==========================
-
-print("Loading model...")
-
-exp = get_exp(EXP_FILE, None)
-model = exp.get_model()
-model.to(DEVICE)
-
-ckpt = torch.load(CKPT_FILE, map_location=DEVICE)
-model.load_state_dict(ckpt["model"])
-model.eval()
-
-print("Model loaded.")
-
-# ==========================
-# INFERENCE LOOP
-# ==========================
-
-image_files = [
-    f for f in os.listdir(IMAGE_FOLDER)
-    if f.lower().endswith((".jpg", ".png", ".jpeg"))
-]
+output_dir = "output_results"
+os.makedirs(output_dir, exist_ok=True)
 
 for img_name in image_files:
 
@@ -54,7 +10,6 @@ for img_name in image_files:
     orig_img = img.copy()
     height, width = img.shape[:2]
 
-    # Preprocess (letterbox + normalization)
     img_processed, ratio = preproc(img, INPUT_SIZE)
     img_tensor = torch.from_numpy(img_processed).unsqueeze(0).float().to(DEVICE)
 
@@ -69,8 +24,7 @@ for img_name in image_files:
 
     if outputs[0] is None:
         print("No detections")
-        cv2.imshow("Result", orig_img)
-        cv2.waitKey(0)
+        cv2.imwrite(os.path.join(output_dir, img_name), orig_img)
         continue
 
     detections = outputs[0].cpu().numpy()
@@ -78,17 +32,12 @@ for img_name in image_files:
     for det in detections:
         x1, y1, x2, y2, obj_conf, class_conf, class_id = det
 
-        # Rescale boxes to original size
         x1 /= ratio
         y1 /= ratio
         x2 /= ratio
         y2 /= ratio
 
-        x1 = int(x1)
-        y1 = int(y1)
-        x2 = int(x2)
-        y2 = int(y2)
-
+        x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
         score = obj_conf * class_conf
         label = CLASS_NAMES[int(class_id)]
 
@@ -103,10 +52,8 @@ for img_name in image_files:
             2
         )
 
-    cv2.imshow("Result", orig_img)
-    key = cv2.waitKey(0)
+    save_path = os.path.join(output_dir, img_name)
+    cv2.imwrite(save_path, orig_img)
+    print(f"Saved: {save_path}")
 
-    if key == 27:  # ESC to exit
-        break
-
-cv2.destroyAllWindows()
+print("Inference complete.")
