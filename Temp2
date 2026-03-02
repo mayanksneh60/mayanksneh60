@@ -1,130 +1,163 @@
-import torch
-import numpy as np
-import cv2
-import os
+import android.graphics.Bitmap
+import android.graphics.RectF
+import org.tensorflow.lite.Interpreter
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlin.math.max
+import kotlin.math.min
 
-# =========================
-# CONFIG
-# =========================
+data class Detection(
+    val classId: Int,
+    val score: Float,
+    val box: RectF
+)
 
-MODEL_TYPE = "pth"   # "pth" or "onnx" or "tflite"
-IMAGE_PATH = "test.jpg"
-INPUT_SIZE = 640
+class YoloxTFLite(
+    private val interpreter: Interpreter,
+    private val inputSize: Int = 640,
+    private val numClasses: Int = 2,
+    private val confThreshold: Float = 0.3f,
+    private val nmsThreshold: Float = 0.45f
+) {
 
-EXP_FILE = "exps/example/yolox_edittext_nano.py"
-CKPT_FILE = "YOLOX_outputs/yolox_edittext_nano/best_ckpt.pth"
-ONNX_FILE = "yolox_model.onnx"
-TFLITE_FILE = "yolox_model.tflite"
+    fun detect(bitmap: Bitmap): List<Detection> {
 
-# =========================
-# LOAD IMAGE
-# =========================
+        val originalWidth = bitmap.width
+        val originalHeight = bitmap.height
 
-img = cv2.imread(IMAGE_PATH)
-img_resized = cv2.resize(img, (INPUT_SIZE, INPUT_SIZE))
-img_input = img_resized.astype(np.float32) / 255.0
-img_input = np.transpose(img_input, (2, 0, 1))  # HWC → CHW
-img_input = np.expand_dims(img_input, 0)
+        val resized = Bitmap.createScaledBitmap(bitmap, inputSize, inputSize, true)
 
-print("Input shape:", img_input.shape)
+        val inputBuffer = ByteBuffer.allocateDirect(1 * 3 * inputSize * inputSize * 4)
+        inputBuffer.order(ByteOrder.nativeOrder())
 
-# =========================
-# PTH CHECK
-# =========================
+        // NCHW input (YOLOX default)
+        for (c in 0 until 3) {
+            for (y in 0 until inputSize) {
+                for (x in 0 until inputSize) {
+                    val pixel = resized.getPixel(x, y)
 
-if MODEL_TYPE == "pth":
-    from yolox.exp import get_exp
+                    val value = when (c) {
+                        0 -> ((pixel shr 16 and 0xFF) / 255f)
+                        1 -> ((pixel shr 8 and 0xFF) / 255f)
+                        else -> ((pixel and 0xFF) / 255f)
+                    }
 
-    print("\n=== Testing PTH Model ===")
+                    inputBuffer.putFloat(value)
+                }
+            }
+        }
 
-    exp = get_exp(EXP_FILE, None)
-    model = exp.get_model()
-    ckpt = torch.load(CKPT_FILE, map_location="cpu")
-    model.load_state_dict(ckpt["model"])
-    model.eval()
+        // Output: [1, 8400, 5 + numClasses]
+        val output = Array(1) { Array(8400) { FloatArray(5 + numClasses) } }
 
-    with torch.no_grad():
-        output = model(torch.from_numpy(img_input))
-    
-    output = output[0].numpy()
+        interpreter.run(inputBuffer, output)
 
-# =========================
-# ONNX CHECK
-# =========================
+        return postProcess(
+            output[0],
+            originalWidth,
+            originalHeight
+        )
+    }
 
-elif MODEL_TYPE == "onnx":
-    print("\n=== Testing ONNX Model ===")
+    private fun postProcess(
+        predictions: Array<FloatArray>,
+        originalWidth: Int,
+        originalHeight: Int
+    ): List<Detection> {
 
-    import onnxruntime as ort
-    session = ort.InferenceSession(ONNX_FILE)
-    input_name = session.get_inputs()[0].name
-    output = session.run(None, {input_name: img_input})[0][0]
+        val detections = mutableListOf<Detection>()
 
-# =========================
-# TFLITE CHECK
-# =========================
+        val scaleX = originalWidth.toFloat() / inputSize
+        val scaleY = originalHeight.toFloat() / inputSize
 
-elif MODEL_TYPE == "tflite":
-    print("\n=== Testing TFLite Model ===")
+        for (pred in predictions) {
 
-    import tensorflow as tf
-    interpreter = tf.lite.Interpreter(model_path=TFLITE_FILE)
-    interpreter.allocate_tensors()
+            val x1 = pred[0]
+            val y1 = pred[1]
+            val x2 = pred[2]
+            val y2 = pred[3]
+            val obj = pred[4]
 
-    input_details = interpreter.get_input_details()
-    output_details = interpreter.get_output_details()
+            if (obj <= 0f) continue
 
-    print("Input details:", input_details)
-    print("Output details:", output_details)
+            var bestClass = -1
+            var bestClassScore = 0f
 
-    interpreter.set_tensor(input_details[0]["index"], img_input.astype(np.float32))
-    interpreter.invoke()
-    output = interpreter.get_tensor(output_details[0]["index"])[0]
+            for (c in 0 until numClasses) {
+                if (pred[5 + c] > bestClassScore) {
+                    bestClassScore = pred[5 + c]
+                    bestClass = c
+                }
+            }
 
-else:
-    raise ValueError("Invalid MODEL_TYPE")
+            val finalScore = obj * bestClassScore
+            if (finalScore < confThreshold) continue
 
-# =========================
-# DIAGNOSTICS
-# =========================
+            // Scale back to original image size
+            val finalX1 = (x1 * scaleX).coerceIn(0f, originalWidth.toFloat())
+            val finalY1 = (y1 * scaleY).coerceIn(0f, originalHeight.toFloat())
+            val finalX2 = (x2 * scaleX).coerceIn(0f, originalWidth.toFloat())
+            val finalY2 = (y2 * scaleY).coerceIn(0f, originalHeight.toFloat())
 
-print("\n=== OUTPUT DIAGNOSTICS ===")
+            if (finalX2 <= finalX1 || finalY2 <= finalY1) continue
 
-print("Output shape:", output.shape)
+            detections.add(
+                Detection(
+                    classId = bestClass,
+                    score = finalScore,
+                    box = RectF(finalX1, finalY1, finalX2, finalY2)
+                )
+            )
+        }
 
-print("Min value:", np.min(output))
-print("Max value:", np.max(output))
-print("Mean value:", np.mean(output))
+        return classAwareNMS(detections)
+    }
 
-print("Contains NaN:", np.isnan(output).any())
-print("Contains Inf:", np.isinf(output).any())
+    private fun classAwareNMS(detections: List<Detection>): List<Detection> {
 
-print("\nFirst 5 predictions:")
-for i in range(5):
-    print(output[i])
+        val finalDetections = mutableListOf<Detection>()
 
-# =========================
-# DETECTION TYPE CHECK
-# =========================
+        for (classId in 0 until numClasses) {
 
-if output.shape[1] >= 7:
-    print("\nLikely format: [x1, y1, x2, y2, obj, class0, class1...]")
-elif output.shape[1] == 6:
-    print("\nLikely format: [cx, cy, w, h, obj, class]")
-else:
-    print("\nUnknown format. Likely decode layer missing.")
+            val classDetections = detections
+                .filter { it.classId == classId }
+                .sortedByDescending { it.score }
+                .toMutableList()
 
-# =========================
-# SANITY CHECK BOXES
-# =========================
+            while (classDetections.isNotEmpty()) {
 
-valid_boxes = 0
+                val best = classDetections.removeAt(0)
+                finalDetections.add(best)
 
-for row in output:
-    x1, y1, x2, y2 = row[0], row[1], row[2], row[3]
-    if x2 > x1 and y2 > y1:
-        valid_boxes += 1
+                val iterator = classDetections.iterator()
 
-print("\nValid box count:", valid_boxes)
+                while (iterator.hasNext()) {
+                    val other = iterator.next()
+                    if (iou(best.box, other.box) > nmsThreshold) {
+                        iterator.remove()
+                    }
+                }
+            }
+        }
 
-print("\nDiagnostics complete.")
+        return finalDetections
+    }
+
+    private fun iou(a: RectF, b: RectF): Float {
+
+        val left = max(a.left, b.left)
+        val top = max(a.top, b.top)
+        val right = min(a.right, b.right)
+        val bottom = min(a.bottom, b.bottom)
+
+        val intersection =
+            max(0f, right - left) * max(0f, bottom - top)
+
+        val areaA = (a.right - a.left) * (a.bottom - a.top)
+        val areaB = (b.right - b.left) * (b.bottom - b.top)
+
+        val union = areaA + areaB - intersection
+
+        return if (union <= 0f) 0f else intersection / union
+    }
+}
