@@ -1,164 +1,224 @@
-import android.graphics.Bitmap
-import android.graphics.RectF
+package com.example.yolo
+
+import android.content.Context
+import android.graphics.*
 import org.tensorflow.lite.Interpreter
+import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.channels.FileChannel
+import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 
-data class Detection(
-    val classId: Int,
-    val score: Float,
-    val box: RectF
-)
-
-class YoloxTFLite(
-    private val interpreter: Interpreter,
-    private val inputSize: Int = 640,
-    private val numClasses: Int = 2,
-    private val confThreshold: Float = 0.3f,
-    private val nmsThreshold: Float = 0.45f
+class YoloTFLite(
+    context: Context,
+    modelPath: String
 ) {
+
+    private val interpreter: Interpreter
+    private val inputSize = 640
+    private val numClasses = 2
+    private val confThreshold = 0.4f
+    private val nmsThreshold = 0.45f
+
+    init {
+        val model = loadModelFile(context, modelPath)
+        interpreter = Interpreter(model)
+    }
+
+    // ===================== DATA CLASSES =====================
+
+    data class Detection(
+        val classId: Int,
+        val score: Float,
+        val box: RectF
+    )
+
+    // ===================== INFERENCE =====================
 
     fun detect(bitmap: Bitmap): List<Detection> {
 
         val originalWidth = bitmap.width
         val originalHeight = bitmap.height
 
-        // Resize to model input
         val resized = Bitmap.createScaledBitmap(bitmap, inputSize, inputSize, true)
+        val input = preprocess(resized)
 
-        val inputBuffer = ByteBuffer.allocateDirect(1 * 3 * inputSize * inputSize * 4)
-        inputBuffer.order(ByteOrder.nativeOrder())
-        inputBuffer.rewind()
-
-        // NCHW float32 normalization
-        for (c in 0 until 3) {
-            for (y in 0 until inputSize) {
-                for (x in 0 until inputSize) {
-
-                    val pixel = resized.getPixel(x, y)
-
-                    val value = when (c) {
-                        0 -> ((pixel shr 16 and 0xFF) / 255f) // R
-                        1 -> ((pixel shr 8 and 0xFF) / 255f)  // G
-                        else -> ((pixel and 0xFF) / 255f)      // B
-                    }
-
-                    inputBuffer.putFloat(value)
-                }
-            }
-        }
-
-        // Output shape: [1, 8400, 7]
         val output = Array(1) { Array(8400) { FloatArray(5 + numClasses) } }
 
-        interpreter.run(inputBuffer, output)
+        interpreter.run(input, output)
 
-        return postProcess(
+        val detections = postProcess(
             output[0],
             originalWidth,
             originalHeight
         )
+
+        return detections
     }
+
+    // ===================== PREPROCESS =====================
+
+    private fun preprocess(bitmap: Bitmap): ByteBuffer {
+        val buffer = ByteBuffer.allocateDirect(1 * 3 * inputSize * inputSize * 4)
+        buffer.order(ByteOrder.nativeOrder())
+
+        val pixels = IntArray(inputSize * inputSize)
+        bitmap.getPixels(pixels, 0, inputSize, 0, 0, inputSize, inputSize)
+
+        for (pixel in pixels) {
+            val r = (pixel shr 16 and 0xFF) / 255f
+            val g = (pixel shr 8 and 0xFF) / 255f
+            val b = (pixel and 0xFF) / 255f
+
+            buffer.putFloat(r)
+            buffer.putFloat(g)
+            buffer.putFloat(b)
+        }
+
+        return buffer
+    }
+
+    // ===================== POST PROCESS =====================
 
     private fun postProcess(
         predictions: Array<FloatArray>,
-        originalWidth: Int,
-        originalHeight: Int
+        origW: Int,
+        origH: Int
     ): List<Detection> {
 
-        val detections = mutableListOf<Detection>()
+        val results = mutableListOf<Detection>()
 
-        val scaleX = originalWidth.toFloat() / inputSize
-        val scaleY = originalHeight.toFloat() / inputSize
+        val scaleX = origW.toFloat() / inputSize
+        val scaleY = origH.toFloat() / inputSize
 
         for (pred in predictions) {
 
-            val x1 = pred[0]
-            val y1 = pred[1]
-            val x2 = pred[2]
-            val y2 = pred[3]
-            val obj = pred[4]
+            val objConf = sigmoid(pred[4])
+            if (objConf < confThreshold) continue
 
-            // Find best class
             var bestClass = -1
             var bestScore = 0f
 
-            for (c in 0 until numClasses) {
-                val classScore = pred[5 + c]
-                if (classScore > bestScore) {
-                    bestScore = classScore
-                    bestClass = c
+            for (i in 0 until numClasses) {
+                val classScore = sigmoid(pred[5 + i])
+                val score = objConf * classScore
+                if (score > bestScore) {
+                    bestScore = score
+                    bestClass = i
                 }
             }
 
-            val finalScore = obj * bestScore
-            if (finalScore < confThreshold) continue
+            if (bestScore < confThreshold) continue
 
-            // Scale back to original image size
-            val finalX1 = (x1 * scaleX).coerceIn(0f, originalWidth.toFloat())
-            val finalY1 = (y1 * scaleY).coerceIn(0f, originalHeight.toFloat())
-            val finalX2 = (x2 * scaleX).coerceIn(0f, originalWidth.toFloat())
-            val finalY2 = (y2 * scaleY).coerceIn(0f, originalHeight.toFloat())
+            val cx = pred[0]
+            val cy = pred[1]
+            val w = pred[2]
+            val h = pred[3]
 
-            detections.add(
+            val left = (cx - w / 2f) * scaleX
+            val top = (cy - h / 2f) * scaleY
+            val right = (cx + w / 2f) * scaleX
+            val bottom = (cy + h / 2f) * scaleY
+
+            // 🔥 CLAMP TO IMAGE BOUNDS
+            val clamped = RectF(
+                max(0f, left),
+                max(0f, top),
+                min(origW.toFloat(), right),
+                min(origH.toFloat(), bottom)
+            )
+
+            // Skip invalid giant boxes
+            if (clamped.width() <= 1f || clamped.height() <= 1f) continue
+
+            results.add(
                 Detection(
-                    classId = bestClass,
-                    score = finalScore,
-                    box = RectF(finalX1, finalY1, finalX2, finalY2)
+                    bestClass,
+                    bestScore,
+                    clamped
                 )
             )
         }
 
-        return classAwareNMS(detections)
+        return applyNMS(results)
     }
 
-    private fun classAwareNMS(detections: List<Detection>): List<Detection> {
+    // ===================== NMS =====================
 
-        val finalDetections = mutableListOf<Detection>()
+    private fun applyNMS(detections: List<Detection>): List<Detection> {
+        val sorted = detections.sortedByDescending { it.score }.toMutableList()
+        val selected = mutableListOf<Detection>()
 
-        for (classId in 0 until numClasses) {
+        while (sorted.isNotEmpty()) {
+            val first = sorted.removeAt(0)
+            selected.add(first)
 
-            val classDetections = detections
-                .filter { it.classId == classId }
-                .sortedByDescending { it.score }
-                .toMutableList()
-
-            while (classDetections.isNotEmpty()) {
-
-                val best = classDetections.removeAt(0)
-                finalDetections.add(best)
-
-                val iterator = classDetections.iterator()
-
-                while (iterator.hasNext()) {
-                    val other = iterator.next()
-                    if (iou(best.box, other.box) > nmsThreshold) {
-                        iterator.remove()
-                    }
-                }
+            sorted.removeAll {
+                iou(first.box, it.box) > nmsThreshold
             }
         }
 
-        return finalDetections
+        return selected
     }
 
     private fun iou(a: RectF, b: RectF): Float {
+        val areaA = a.width() * a.height()
+        val areaB = b.width() * b.height()
 
         val left = max(a.left, b.left)
         val top = max(a.top, b.top)
         val right = min(a.right, b.right)
         val bottom = min(a.bottom, b.bottom)
 
-        val intersection =
-            max(0f, right - left) * max(0f, bottom - top)
+        val interWidth = max(0f, right - left)
+        val interHeight = max(0f, bottom - top)
+        val interArea = interWidth * interHeight
 
-        val areaA = (a.right - a.left) * (a.bottom - a.top)
-        val areaB = (b.right - b.left) * (b.bottom - b.top)
+        return interArea / (areaA + areaB - interArea + 1e-6f)
+    }
 
-        val union = areaA + areaB - intersection
+    private fun sigmoid(x: Float): Float {
+        return (1f / (1f + exp(-x)))
+    }
 
-        return if (union <= 0f) 0f else intersection / union
+    // ===================== DRAW =====================
+
+    fun drawDetections(
+        bitmap: Bitmap,
+        detections: List<Detection>
+    ): Bitmap {
+
+        val output = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(output)
+
+        // CLEAR ISSUE FIX
+        canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+
+        val paint = Paint().apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 4f
+            color = Color.RED
+        }
+
+        for (det in detections) {
+            canvas.drawRect(det.box, paint)
+        }
+
+        return output
+    }
+
+    // ===================== LOAD MODEL =====================
+
+    private fun loadModelFile(context: Context, path: String): ByteBuffer {
+        val fileDescriptor = context.assets.openFd(path)
+        val inputStream = FileInputStream(fileDescriptor.fileDescriptor)
+        val fileChannel = inputStream.channel
+        return fileChannel.map(
+            FileChannel.MapMode.READ_ONLY,
+            fileDescriptor.startOffset,
+            fileDescriptor.declaredLength
+        )
     }
 }
