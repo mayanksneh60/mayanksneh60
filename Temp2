@@ -1,3 +1,48 @@
+def decode_yolox(output, input_size=(640, 640)):
+    grids = []
+    expanded_strides = []
+    strides = [8, 16, 32] # Standard YOLOX strides
+
+    # Generate grids manually to decode the raw output
+    for stride in strides:
+        hsize = input_size[0] // stride
+        wsize = input_size[1] // stride
+        grid_y, grid_x = np.meshgrid(np.arange(hsize), np.arange(wsize))
+        grid = np.stack((grid_x, grid_y), axis=-1).reshape(-1, 2)
+        grids.append(grid)
+        shape = grid.shape[:1]
+        expanded_strides.append(np.full((*shape, 1), stride))
+
+    grids = np.concatenate(grids, axis=0)
+    expanded_strides = np.concatenate(expanded_strides, axis=0)
+
+    # Apply the formula: (grid + offset) * stride
+    output[..., :2] = (output[..., :2] + grids) * expanded_strides
+    output[..., 2:4] = np.exp(output[..., 2:4]) * expanded_strides
+    return output
+
+def run_inference(model_path, image_path):
+    # ... (Keep interpreter setup and pre_process as before) ...
+    
+    interpreter.invoke()
+    output_data = interpreter.get_tensor(output_details[0]['index'])
+
+    # 1. DECODE the raw output
+    predictions = decode_yolox(output_data[0], input_size=(640, 640))
+
+    # 2. Filter Results
+    scores = predictions[:, 4] * np.max(predictions[:, 5:], axis=1)
+    class_ids = np.argmax(predictions[:, 5:], axis=1)
+
+    # Use a very low threshold just to see if ANY boxes appear
+    mask = scores > 0.01 
+    
+    # ... (Rest of your drawing logic) ...
+
+
+
+
+
 import cv2
 import numpy as np
 import tensorflow as tf
