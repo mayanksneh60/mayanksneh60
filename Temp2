@@ -3,13 +3,8 @@ import numpy as np
 import tensorflow as tf
 
 def pre_process(image, input_size=(640, 640)):
-    """Pre-processes the image for the YOLOX model.
-    """
-    if len(image.shape) == 3:
-        padded_img = np.ones((input_size[0], input_size[1], 3), dtype=np.uint8) * 114
-    else:
-        padded_img = np.ones(input_size, dtype=np.uint8) * 114
-
+    # Standard YOLOX preprocessing: Resize with padding (letterbox)
+    padded_img = np.ones((input_size[0], input_size[1], 3), dtype=np.uint8) * 114
     r = min(input_size[0] / image.shape[0], input_size[1] / image.shape[1])
     resized_img = cv2.resize(
         image,
@@ -18,117 +13,70 @@ def pre_process(image, input_size=(640, 640)):
     ).astype(np.uint8)
     padded_img[: int(image.shape[0] * r), : int(image.shape[1] * r)] = resized_img
     
-    # Preprocessing, including scaling to [0, 1] and color space conversion
-    padded_img = padded_img.transpose((2, 0, 1)) # HWC to CHW
+    # CHW conversion and normalization
+    padded_img = padded_img.transpose((2, 0, 1)) 
     padded_img = np.ascontiguousarray(padded_img, dtype=np.float32)
-    padded_img /= 255.0  # Normalize to [0, 1]
-    
+    padded_img /= 255.0 
     return padded_img, r
 
-def post_process(prediction, input_size, num_classes=2, conf_thre=0.3, nms_thre=0.45):
-    """Post-processes the model's output predictions.
-    """
-    box_corner = prediction.new(prediction.shape)
-    box_corner[:, :, 0] = prediction[:, :, 0] - prediction[:, :, 2] / 2
-    box_corner[:, :, 1] = prediction[:, :, 1] - prediction[:, :, 3] / 2
-    box_corner[:, :, 2] = prediction[:, :, 0] + prediction[:, :, 2] / 2
-    box_corner[:, :, 3] = prediction[:, :, 1] + prediction[:, :, 3] / 2
-    prediction[:, :, :4] = box_corner[:, :, :4]
-
-    output = [None for _ in range(len(prediction))]
-    for i, image_pred in enumerate(prediction):
-
-        # Filter out confidence scores below threshold
-        class_conf, class_pred = torch.max(image_pred[:, 5: 5 + num_classes], 1, keepdim=True)
-        conf_mask = (image_pred[:, 4] * class_conf.squeeze() > conf_thre).squeeze()
-        
-        # Detections: [x1, y1, x2, y2, obj_conf, class_conf, class_pred]
-        detections = torch.cat((image_pred[:, :5], class_conf, class_pred.float()), 1)
-        detections = detections[conf_mask]
-        
-        if not detections.size(0):
-            continue
-
-        # Non-maximum suppression
-        nms_out_index = torchvision.ops.nms(
-            detections[:, :4],
-            detections[:, 4] * detections[:, 5],
-            nms_thre,
-        )
-        detections = detections[nms_out_index]
-        output[i] = detections
-
-    return output
-
-def run_inference(model_path, image_path, class_names):
-    # Load the TFLite model and allocate tensors.
+def run_inference(model_path, image_path):
+    # 1. Load Model
     interpreter = tf.lite.Interpreter(model_path=model_path)
     interpreter.allocate_tensors()
 
-    # Get input and output details.
     input_details = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
 
-    # Read the image and pre-process it
+    # 2. Prepare Image
     original_img = cv2.imread(image_path)
-    if original_img is None:
-        print(f"Error: Could not read image from {image_path}")
-        return
-
-    # Assuming input size from training is (640, 640)
-    input_size = (640, 640) 
+    input_size = (640, 640)
     input_data, ratio = pre_process(original_img, input_size)
-    
-    # Set the input tensor
-    input_data = np.expand_dims(input_data, axis=0) # Add batch dimension
+    input_data = np.expand_dims(input_data, axis=0)
+
+    # 3. Inference
     interpreter.set_tensor(input_details[0]['index'], input_data)
-
-    # Run inference
     interpreter.invoke()
-
-    # Get the output tensor
     output_data = interpreter.get_tensor(output_details[0]['index'])
-    # Need to convert from numpy to torch for existing post-processing.
-    # A cleaner approach would be to port post-processing to numpy.
-    import torch 
-    import torchvision
-    output_data = torch.from_numpy(output_data)
 
-    # Post-processing to get bounding boxes and classes
-    num_classes = len(class_names)
-    predictions = post_process(output_data, input_size, num_classes=num_classes)
+    # --- DEBUG PRINT: RAW OUTPUT ---
+    print(f"Raw output shape: {output_data.shape}")
+    # YOLOX output is typically [1, 8400, 5 + num_classes]
+    # Let's check the first few rows to see if we have non-zero values
+    print("First 5 raw predictions (subset):")
+    print(output_data[0, :5, :]) 
+    
+    # 4. Filter Results (Simplified Post-process)
+    # [batch, num_proposals, 5 + num_classes]
+    predictions = output_data[0]
+    boxes = predictions[:, :4]
+    scores = predictions[:, 4] * np.max(predictions[:, 5:], axis=1)
+    class_ids = np.argmax(predictions[:, 5:], axis=1)
 
-    # Draw results on the image
-    if predictions[0] is not None:
-        dets = predictions[0].cpu().numpy()
-        # Rescale boxes to original image size
-        dets[:, :4] /= ratio
+    # Filter by a lower threshold for debugging (0.1 instead of 0.3)
+    mask = scores > 0.1
+    filtered_boxes = boxes[mask]
+    filtered_scores = scores[mask]
+    filtered_classes = class_ids[mask]
+
+    print(f"\nDetections found above 0.1 threshold: {len(filtered_boxes)}")
+
+    # 5. Draw and Display
+    class_names = ["focused_edittext", "normal_edittext"]
+    for i in range(len(filtered_boxes)):
+        box = filtered_boxes[i]
+        # Convert center xywh to corner x1y1x2y2
+        x1 = (box[0] - box[2]/2) / ratio
+        y1 = (box[1] - box[3]/2) / ratio
+        x2 = (box[0] + box[2]/2) / ratio
+        y2 = (box[1] + box[3]/2) / ratio
         
-        for det in dets:
-            x1, y1, x2, y2 = det[:4].astype(int)
-            conf = det[4] * det[5]
-            class_id = int(det[6])
-            class_name = class_names[class_id]
-            
-            # Color coding (e.g., green for normal, red for focused)
-            color = (0, 255, 0) if class_id == 1 else (0, 0, 255) 
-            
-            label = f"{class_name}: {conf:.2f}"
-            cv2.rectangle(original_img, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(original_img, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        print(f"Box: [{int(x1)}, {int(y1)}, {int(x2)}, {int(y2)}] | Class: {class_names[filtered_classes[i]]} | Conf: {filtered_scores[i]:.2f}")
+        
+        color = (0, 0, 255) if filtered_classes[i] == 0 else (0, 255, 0)
+        cv2.rectangle(original_img, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
 
-    # Display the result
-    cv2.imshow("Detection Result", original_img)
+    cv2.imshow("Debug Results", original_img)
     cv2.waitKey(0)
-    cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    # Path to your TFLite model file
-    model_path = "path/to/your/model.tflite" 
-    # Path to your test image
-    image_path = "path/to/your/test_image.jpg" 
-    
-    # Class names as defined in your project
-    class_names = ["focused_edittext", "normal_edittext"]
-
-    run_inference(model_path, image_path, class_names)
+    run_inference("model.tflite", "test.jpg")
