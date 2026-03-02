@@ -25,21 +25,24 @@ class YoloxTFLite(
         val originalWidth = bitmap.width
         val originalHeight = bitmap.height
 
+        // Resize to model input
         val resized = Bitmap.createScaledBitmap(bitmap, inputSize, inputSize, true)
 
         val inputBuffer = ByteBuffer.allocateDirect(1 * 3 * inputSize * inputSize * 4)
         inputBuffer.order(ByteOrder.nativeOrder())
+        inputBuffer.rewind()
 
-        // NCHW input (YOLOX default)
+        // NCHW float32 normalization
         for (c in 0 until 3) {
             for (y in 0 until inputSize) {
                 for (x in 0 until inputSize) {
+
                     val pixel = resized.getPixel(x, y)
 
                     val value = when (c) {
-                        0 -> ((pixel shr 16 and 0xFF) / 255f)
-                        1 -> ((pixel shr 8 and 0xFF) / 255f)
-                        else -> ((pixel and 0xFF) / 255f)
+                        0 -> ((pixel shr 16 and 0xFF) / 255f) // R
+                        1 -> ((pixel shr 8 and 0xFF) / 255f)  // G
+                        else -> ((pixel and 0xFF) / 255f)      // B
                     }
 
                     inputBuffer.putFloat(value)
@@ -47,7 +50,7 @@ class YoloxTFLite(
             }
         }
 
-        // Output: [1, 8400, 5 + numClasses]
+        // Output shape: [1, 8400, 7]
         val output = Array(1) { Array(8400) { FloatArray(5 + numClasses) } }
 
         interpreter.run(inputBuffer, output)
@@ -78,19 +81,19 @@ class YoloxTFLite(
             val y2 = pred[3]
             val obj = pred[4]
 
-            if (obj <= 0f) continue
-
+            // Find best class
             var bestClass = -1
-            var bestClassScore = 0f
+            var bestScore = 0f
 
             for (c in 0 until numClasses) {
-                if (pred[5 + c] > bestClassScore) {
-                    bestClassScore = pred[5 + c]
+                val classScore = pred[5 + c]
+                if (classScore > bestScore) {
+                    bestScore = classScore
                     bestClass = c
                 }
             }
 
-            val finalScore = obj * bestClassScore
+            val finalScore = obj * bestScore
             if (finalScore < confThreshold) continue
 
             // Scale back to original image size
@@ -98,8 +101,6 @@ class YoloxTFLite(
             val finalY1 = (y1 * scaleY).coerceIn(0f, originalHeight.toFloat())
             val finalX2 = (x2 * scaleX).coerceIn(0f, originalWidth.toFloat())
             val finalY2 = (y2 * scaleY).coerceIn(0f, originalHeight.toFloat())
-
-            if (finalX2 <= finalX1 || finalY2 <= finalY1) continue
 
             detections.add(
                 Detection(
