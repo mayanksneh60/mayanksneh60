@@ -8,158 +8,204 @@ import matplotlib.pyplot as plt
 # ==========================
 MODEL_PATH = "yolox.tflite"
 IMAGE_PATH = "test.jpg"
-
-INPUT_SIZE = (640, 640)
+INPUT_SIZE = 640
 NUM_CLASSES = 2
 CONF_THRESHOLD = 0.3
 NMS_THRESHOLD = 0.45
 
 CLASS_NAMES = ["normal_edit_text", "focused_edit_text"]
 
-
 # ==========================
 # LOAD MODEL
 # ==========================
+print("\n==============================")
 print("Loading TFLite model...")
+print("==============================")
+
 interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
 interpreter.allocate_tensors()
 
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
-print("\n=== MODEL INPUT DETAILS ===")
+print("\n=== INPUT DETAILS ===")
 print(input_details)
 
-print("\n=== MODEL OUTPUT DETAILS ===")
+print("\n=== OUTPUT DETAILS ===")
 print(output_details)
 
+print("\nModel input shape:", input_details[0]['shape'])
+print("Model input dtype:", input_details[0]['dtype'])
+print("Output shape:", output_details[0]['shape'])
+print("Output dtype:", output_details[0]['dtype'])
+print("Output quantization params:", output_details[0]['quantization'])
+
 
 # ==========================
-# LOAD & PREPROCESS IMAGE
+# LOAD IMAGE
 # ==========================
-print("\nLoading image...")
-image = cv2.imread(IMAGE_PATH)
-if image is None:
+print("\n==============================")
+print("Reading image...")
+print("==============================")
+
+original_image = cv2.imread(IMAGE_PATH)
+if original_image is None:
     raise ValueError("Image not found!")
 
-original_image = image.copy()
-orig_h, orig_w = image.shape[:2]
+orig_h, orig_w = original_image.shape[:2]
+print("Original image shape:", original_image.shape)
 
-print(f"Original image shape: {image.shape}")
+image = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
+image_resized = cv2.resize(image, (INPUT_SIZE, INPUT_SIZE))
+print("Resized image shape:", image_resized.shape)
 
-image_resized = cv2.resize(image, INPUT_SIZE)
-image_rgb = cv2.cvtColor(image_resized, cv2.COLOR_BGR2RGB)
-image_input = image_rgb.astype(np.float32)
 
-# Normalize (YOLOX usually expects 0-1 or raw float — we print to verify)
-image_input /= 255.0
+# ==========================
+# PREPROCESS
+# ==========================
+print("\n==============================")
+print("Preprocessing image...")
+print("==============================")
+
+input_dtype = input_details[0]['dtype']
+
+if input_dtype == np.float32:
+    image_resized = image_resized.astype(np.float32) / 255.0
+    print("Normalized image to [0,1]")
+else:
+    image_resized = image_resized.astype(input_dtype)
+    print("Converted image to dtype:", input_dtype)
+
+# Convert HWC → CHW (VERY IMPORTANT FOR YOLOX)
+image_transposed = np.transpose(image_resized, (2, 0, 1))
+print("After transpose (CHW):", image_transposed.shape)
 
 # Add batch dimension
-image_input = np.expand_dims(image_input, axis=0)
+input_data = np.expand_dims(image_transposed, axis=0)
+print("Final input tensor shape:", input_data.shape)
 
-print(f"Input tensor shape after preprocessing: {image_input.shape}")
-print(f"Input dtype: {image_input.dtype}")
-print(f"Min pixel: {image_input.min()}, Max pixel: {image_input.max()}")
+# If quantized model → apply scale
+input_scale, input_zero_point = input_details[0]['quantization']
+if input_scale != 0:
+    print("Applying input quantization...")
+    input_data = input_data / input_scale + input_zero_point
+    input_data = input_data.astype(input_dtype)
+
+interpreter.set_tensor(input_details[0]['index'], input_data)
+
 
 # ==========================
-# RUN INFERENCE
+# INFERENCE
 # ==========================
-print("\nRunning inference...")
-interpreter.set_tensor(input_details[0]['index'], image_input)
+print("\n==============================")
+print("Running inference...")
+print("==============================")
+
 interpreter.invoke()
 
 output_data = interpreter.get_tensor(output_details[0]['index'])
+print("Raw output shape:", output_data.shape)
 
-print("\n=== RAW OUTPUT ===")
-print("Output shape:", output_data.shape)
-print("Output dtype:", output_data.dtype)
-print("Output min:", np.min(output_data))
-print("Output max:", np.max(output_data))
+# Dequantize if needed
+output_scale, output_zero_point = output_details[0]['quantization']
+if output_scale != 0:
+    print("Dequantizing output...")
+    output_data = (output_data.astype(np.float32) - output_zero_point) * output_scale
+
+predictions = np.squeeze(output_data)
+print("After squeeze shape:", predictions.shape)
+
+print("\nSample raw predictions (first 5 rows):")
+print(predictions[:5])
 
 
 # ==========================
-# POST PROCESSING (YOLOX style)
+# POSTPROCESS (YOLOX style)
 # ==========================
-print("\nPostprocessing...")
-
-predictions = output_data[0]  # remove batch dimension
-print("Predictions shape:", predictions.shape)
+print("\n==============================")
+print("Processing detections...")
+print("==============================")
 
 boxes = []
 scores = []
 class_ids = []
 
-for pred in predictions:
-    obj_score = pred[4]
+for idx, pred in enumerate(predictions):
+
+    if len(pred) < 5 + NUM_CLASSES:
+        continue  # skip invalid rows
+
+    obj_conf = pred[4]
     class_scores = pred[5:]
 
     class_id = np.argmax(class_scores)
     class_score = class_scores[class_id]
 
-    score = obj_score * class_score
+    score = obj_conf * class_score
 
     if score > CONF_THRESHOLD:
-        cx, cy, w, h = pred[0:4]
+        x_center, y_center, w, h = pred[0:4]
 
-        # Convert from center to corner format
-        x1 = cx - w / 2
-        y1 = cy - h / 2
-        x2 = cx + w / 2
-        y2 = cy + h / 2
+        x1 = (x_center - w / 2) * orig_w / INPUT_SIZE
+        y1 = (y_center - h / 2) * orig_h / INPUT_SIZE
+        x2 = (x_center + w / 2) * orig_w / INPUT_SIZE
+        y2 = (y_center + h / 2) * orig_h / INPUT_SIZE
 
-        boxes.append([x1, y1, x2, y2])
+        boxes.append([int(x1), int(y1), int(x2), int(y2)])
         scores.append(float(score))
         class_ids.append(class_id)
 
-print(f"Boxes before NMS: {len(boxes)}")
+print("Detections above confidence threshold:", len(boxes))
 
-# Apply NMS
-indices = cv2.dnn.NMSBoxes(
-    boxes,
-    scores,
-    CONF_THRESHOLD,
-    NMS_THRESHOLD
-)
 
-print(f"Boxes after NMS: {len(indices)}")
+# ==========================
+# APPLY NMS
+# ==========================
+if len(boxes) > 0:
+    indices = cv2.dnn.NMSBoxes(
+        boxes,
+        scores,
+        CONF_THRESHOLD,
+        NMS_THRESHOLD
+    )
+else:
+    indices = []
+
+print("Detections after NMS:", len(indices))
+
 
 # ==========================
 # DRAW BOXES
 # ==========================
-if len(indices) > 0:
-    for i in indices.flatten():
-        x1, y1, x2, y2 = boxes[i]
+for i in indices:
+    i = i[0] if isinstance(i, (list, tuple, np.ndarray)) else i
 
-        # Scale back to original image size
-        x1 = int(x1 * orig_w / INPUT_SIZE[0])
-        y1 = int(y1 * orig_h / INPUT_SIZE[1])
-        x2 = int(x2 * orig_w / INPUT_SIZE[0])
-        y2 = int(y2 * orig_h / INPUT_SIZE[1])
+    x1, y1, x2, y2 = boxes[i]
+    label = CLASS_NAMES[class_ids[i]]
+    score = scores[i]
 
-        class_id = class_ids[i]
-        score = scores[i]
+    cv2.rectangle(original_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+    cv2.putText(
+        original_image,
+        f"{label}: {score:.2f}",
+        (x1, y1 - 10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (0, 255, 0),
+        2
+    )
 
-        label = f"{CLASS_NAMES[class_id]}: {score:.2f}"
-
-        cv2.rectangle(original_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.putText(original_image, label,
-                    (x1, y1 - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 255, 0),
-                    2)
-
-else:
-    print("⚠ No detections found. Possible reasons:")
-    print("1. Confidence threshold too high")
-    print("2. Output format different (needs decode)")
-    print("3. Model expects non-normalized input")
-    print("4. Anchor/grid decoding missing")
 
 # ==========================
-# DISPLAY IMAGE
+# DISPLAY RESULT
 # ==========================
 plt.figure(figsize=(10, 10))
 plt.imshow(cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB))
 plt.axis("off")
+plt.title("YOLOX TFLite Detection")
 plt.show()
+
+
+print("\n==============================")
+print("Inference Complete")
+print("==============================")
