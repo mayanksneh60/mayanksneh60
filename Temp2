@@ -1,13 +1,26 @@
 import torch
-import argparse
 from yolox.exp import get_exp
 from yolox.utils import fuse_model
+
+# ==========================
+# 🔧 EDIT THESE 3 PATHS ONLY
+# ==========================
+
+EXP_FILE = "exps/example/custom/yolox_s.py"   # your exp file
+CKPT_FILE = "best_ckpt.pth"                   # your trained weights
+OUTPUT_ONNX = "yolox_decode.onnx"             # output name
+INPUT_SIZE = 640                              # your training size
+
+# ==========================
+
 
 class YOLOXWithDecode(torch.nn.Module):
     def __init__(self, model):
         super().__init__()
         self.model = model
-        self.model.head.decode_in_inference = True  # IMPORTANT
+
+        # 🔥 FORCE decode inside graph
+        self.model.head.decode_in_inference = True
 
     def forward(self, x):
         outputs = self.model(x)
@@ -15,41 +28,39 @@ class YOLOXWithDecode(torch.nn.Module):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-f", "--exp_file", type=str, required=True)
-    parser.add_argument("-c", "--ckpt", type=str, required=True)
-    parser.add_argument("--output-name", type=str, default="yolox_decode.onnx")
-    parser.add_argument("--input-size", type=int, default=640)
-    args = parser.parse_args()
 
-    exp = get_exp(args.exp_file, None)
+    print("🔹 Loading experiment...")
+    exp = get_exp(EXP_FILE, None)
+
     model = exp.get_model()
     model.eval()
 
-    # Load weights
-    ckpt = torch.load(args.ckpt, map_location="cpu")
+    print("🔹 Loading checkpoint...")
+    ckpt = torch.load(CKPT_FILE, map_location="cpu")
     model.load_state_dict(ckpt["model"])
 
-    # Fuse Conv + BN
+    print("🔹 Fusing model...")
     model = fuse_model(model)
 
-    # Wrap model with decode enabled
+    print("🔹 Wrapping model with decode...")
     model_with_decode = YOLOXWithDecode(model)
     model_with_decode.eval()
 
-    dummy_input = torch.randn(1, 3, args.input_size, args.input_size)
+    dummy_input = torch.randn(1, 3, INPUT_SIZE, INPUT_SIZE)
 
+    print("🔹 Exporting ONNX with decode included...")
     torch.onnx.export(
         model_with_decode,
         dummy_input,
-        args.output_name,
+        OUTPUT_ONNX,
         input_names=["images"],
         output_names=["output"],
         opset_version=12,
         dynamic_axes=None,
     )
 
-    print("✅ Exported ONNX with decode included:", args.output_name)
+    print("✅ SUCCESS: ONNX exported with decode included")
+    print("📦 Saved as:", OUTPUT_ONNX)
 
 
 if __name__ == "__main__":
