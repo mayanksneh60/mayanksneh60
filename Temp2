@@ -1,48 +1,94 @@
+import cv2
+import numpy as np
+import tensorflow as tf
+import matplotlib.pyplot as plt
+
 # ==========================
-# YOLOX GRID DECODE + POSTPROCESS
+# CONFIG
 # ==========================
-print("\n==============================")
-print("Processing detections with YOLOX decode...")
-print("==============================")
+MODEL_PATH = "yolox.tflite"
+IMAGE_PATH = "test.jpg"
+INPUT_SIZE = 640
+NUM_CLASSES = 2
+CONF_THRESHOLD = 0.3
+NMS_THRESHOLD = 0.45
+
+CLASS_NAMES = ["normal_edit_text", "focused_edit_text"]
+
 
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
 
-# YOLOX strides
-strides = [8, 16, 32]
 
-# Generate grid
-grids = []
-expanded_strides = []
+print("\n==============================")
+print("Loading TFLite model...")
+print("==============================")
 
-for stride in strides:
-    hsize = INPUT_SIZE // stride
-    wsize = INPUT_SIZE // stride
+interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
+interpreter.allocate_tensors()
 
-    xv, yv = np.meshgrid(np.arange(wsize), np.arange(hsize))
-    grid = np.stack((xv, yv), 2).reshape(-1, 2)
-    grids.append(grid)
-    expanded_strides.append(np.full((grid.shape[0], 1), stride))
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
 
-grids = np.concatenate(grids, axis=0)
-expanded_strides = np.concatenate(expanded_strides, axis=0)
+print("Model input shape:", input_details[0]['shape'])
+print("Model output shape:", output_details[0]['shape'])
+print("Model input dtype:", input_details[0]['dtype'])
 
-# Apply sigmoid to obj + class
-predictions[:, 4:] = sigmoid(predictions[:, 4:])
 
-# Decode boxes
-pred_boxes = np.zeros_like(predictions[:, :4])
+# ==========================
+# LOAD IMAGE
+# ==========================
+original_image = cv2.imread(IMAGE_PATH)
+orig_h, orig_w = original_image.shape[:2]
 
-pred_boxes[:, 0:2] = (predictions[:, 0:2] + grids) * expanded_strides
-pred_boxes[:, 2:4] = np.exp(predictions[:, 2:4]) * expanded_strides
+print("Original image shape:", original_image.shape)
+
+image = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
+image_resized = cv2.resize(image, (INPUT_SIZE, INPUT_SIZE))
+
+
+# ==========================
+# PREPROCESS (NCHW)
+# ==========================
+image_resized = image_resized.astype(np.float32) / 255.0
+image_transposed = np.transpose(image_resized, (2, 0, 1))
+input_data = np.expand_dims(image_transposed, axis=0)
+
+print("Final input shape:", input_data.shape)
+
+interpreter.set_tensor(input_details[0]['index'], input_data)
+
+
+# ==========================
+# INFERENCE
+# ==========================
+interpreter.invoke()
+output_data = interpreter.get_tensor(output_details[0]['index'])
+
+print("Raw output shape:", output_data.shape)
+
+predictions = np.squeeze(output_data)
+
+print("After squeeze:", predictions.shape)
+print("Sample predictions:", predictions[:5])
+
+
+# ==========================
+# POSTPROCESS (NO GRID, NO EXP)
+# ==========================
+print("\nProcessing detections...")
 
 boxes = []
 scores = []
 class_ids = []
 
-for i in range(len(pred_boxes)):
-    obj_conf = predictions[i, 4]
-    class_scores = predictions[i, 5:]
+for pred in predictions:
+
+    x_center, y_center, w, h = pred[:4]
+
+    # Apply sigmoid ONLY to objectness + classes
+    obj_conf = sigmoid(pred[4])
+    class_scores = sigmoid(pred[5:])
 
     class_id = np.argmax(class_scores)
     class_score = class_scores[class_id]
@@ -50,15 +96,71 @@ for i in range(len(pred_boxes)):
     score = obj_conf * class_score
 
     if score > CONF_THRESHOLD:
-        x_center, y_center, w, h = pred_boxes[i]
 
-        x1 = (x_center - w / 2) * orig_w / INPUT_SIZE
-        y1 = (y_center - h / 2) * orig_h / INPUT_SIZE
-        x2 = (x_center + w / 2) * orig_w / INPUT_SIZE
-        y2 = (y_center + h / 2) * orig_h / INPUT_SIZE
+        x1 = (x_center - w / 2)
+        y1 = (y_center - h / 2)
+        x2 = (x_center + w / 2)
+        y2 = (y_center + h / 2)
+
+        # Scale to original image size
+        x1 = x1 * orig_w / INPUT_SIZE
+        y1 = y1 * orig_h / INPUT_SIZE
+        x2 = x2 * orig_w / INPUT_SIZE
+        y2 = y2 * orig_h / INPUT_SIZE
+
+        # Clip to image bounds (prevents overflow)
+        x1 = np.clip(x1, 0, orig_w)
+        y1 = np.clip(y1, 0, orig_h)
+        x2 = np.clip(x2, 0, orig_w)
+        y2 = np.clip(y2, 0, orig_h)
 
         boxes.append([int(x1), int(y1), int(x2), int(y2)])
         scores.append(float(score))
         class_ids.append(class_id)
 
-print("Detections above confidence threshold:", len(boxes))
+print("Detections before NMS:", len(boxes))
+
+
+# ==========================
+# NMS
+# ==========================
+if len(boxes) > 0:
+    indices = cv2.dnn.NMSBoxes(boxes, scores, CONF_THRESHOLD, NMS_THRESHOLD)
+else:
+    indices = []
+
+print("Detections after NMS:", len(indices))
+
+
+# ==========================
+# DRAW
+# ==========================
+for i in indices:
+    i = i[0] if isinstance(i, (list, tuple, np.ndarray)) else i
+
+    x1, y1, x2, y2 = boxes[i]
+    label = CLASS_NAMES[class_ids[i]]
+    score = scores[i]
+
+    cv2.rectangle(original_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+    cv2.putText(
+        original_image,
+        f"{label}: {score:.2f}",
+        (x1, y1 - 10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (0, 255, 0),
+        2
+    )
+
+
+# ==========================
+# SHOW RESULT
+# ==========================
+plt.figure(figsize=(8, 10))
+plt.imshow(cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB))
+plt.axis("off")
+plt.title("YOLOX TFLite Detection")
+plt.show()
+
+print("\nInference Complete.")
