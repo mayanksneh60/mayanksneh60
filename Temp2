@@ -1,3 +1,50 @@
+# ==========================
+# POSTPROCESS (FIXED)
+# ==========================
+print("\n==============================")
+print("Processing detections (with sigmoid)...")
+print("==============================")
+
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
+
+boxes = []
+scores = []
+class_ids = []
+
+for pred in predictions:
+
+    if len(pred) < 5 + NUM_CLASSES:
+        continue
+
+    # Apply sigmoid to objectness
+    obj_conf = sigmoid(pred[4])
+
+    # Apply sigmoid to class scores
+    class_scores = sigmoid(pred[5:])
+
+    class_id = np.argmax(class_scores)
+    class_score = class_scores[class_id]
+
+    score = obj_conf * class_score
+
+    if score > CONF_THRESHOLD:
+        x_center, y_center, w, h = pred[0:4]
+
+        # Convert to corner format
+        x1 = (x_center - w / 2) * orig_w / INPUT_SIZE
+        y1 = (y_center - h / 2) * orig_h / INPUT_SIZE
+        x2 = (x_center + w / 2) * orig_w / INPUT_SIZE
+        y2 = (y_center + h / INPUT_SIZE / 2)
+
+        boxes.append([int(x1), int(y1), int(x2), int(y2)])
+        scores.append(float(score))
+        class_ids.append(class_id)
+
+print("Detections above confidence threshold:", len(boxes))
+
+
+
 import cv2
 import numpy as np
 import tensorflow as tf
