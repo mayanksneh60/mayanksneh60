@@ -7,6 +7,7 @@ import tensorflow as tf
 # ==========================
 TFLITE_MODEL = "yolox_decode.tflite"
 IMAGE_PATH = "test.jpg"
+OUTPUT_IMAGE = "tflite_result.jpg"
 INPUT_SIZE = 640
 NUM_CLASSES = 2
 CONF_THRESHOLD = 0.3
@@ -21,7 +22,7 @@ def preprocess(image_path):
     img = cv2.resize(img, (INPUT_SIZE, INPUT_SIZE))
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     img = img.astype(np.float32) / 255.0
-    img = np.transpose(img, (2, 0, 1))  # HWC -> CHW
+    img = np.transpose(img, (2, 0, 1))  # HWC → CHW
     img = np.expand_dims(img, axis=0)
 
     return img, orig
@@ -40,13 +41,12 @@ def postprocess(predictions, orig_img):
 
         class_id = np.argmax(class_scores)
         class_score = class_scores[class_id]
-
         score = obj_score * class_score
 
         if score < CONF_THRESHOLD:
             continue
 
-        # Convert center → xyxy
+        # center → xyxy
         x1 = (x - bw / 2) * w / INPUT_SIZE
         y1 = (y - bh / 2) * h / INPUT_SIZE
         x2 = (x + bw / 2) * w / INPUT_SIZE
@@ -56,7 +56,6 @@ def postprocess(predictions, orig_img):
         scores.append(float(score))
         class_ids.append(class_id)
 
-    # Apply NMS
     indices = cv2.dnn.NMSBoxes(
         boxes,
         scores,
@@ -102,12 +101,11 @@ def main():
     predictions = interpreter.get_tensor(output_details[0]['index'])
 
     boxes, scores, class_ids, indices = postprocess(predictions, orig_img)
-
     result = draw_boxes(orig_img, boxes, scores, class_ids, indices)
 
-    cv2.imshow("Result", result)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    cv2.imwrite(OUTPUT_IMAGE, result)
+
+    print("✅ Result saved to:", OUTPUT_IMAGE)
 
 
 if __name__ == "__main__":
