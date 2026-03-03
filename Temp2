@@ -1,27 +1,48 @@
 # ==========================
-# POSTPROCESS (FIXED)
+# YOLOX GRID DECODE + POSTPROCESS
 # ==========================
 print("\n==============================")
-print("Processing detections (with sigmoid)...")
+print("Processing detections with YOLOX decode...")
 print("==============================")
 
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
 
+# YOLOX strides
+strides = [8, 16, 32]
+
+# Generate grid
+grids = []
+expanded_strides = []
+
+for stride in strides:
+    hsize = INPUT_SIZE // stride
+    wsize = INPUT_SIZE // stride
+
+    xv, yv = np.meshgrid(np.arange(wsize), np.arange(hsize))
+    grid = np.stack((xv, yv), 2).reshape(-1, 2)
+    grids.append(grid)
+    expanded_strides.append(np.full((grid.shape[0], 1), stride))
+
+grids = np.concatenate(grids, axis=0)
+expanded_strides = np.concatenate(expanded_strides, axis=0)
+
+# Apply sigmoid to obj + class
+predictions[:, 4:] = sigmoid(predictions[:, 4:])
+
+# Decode boxes
+pred_boxes = np.zeros_like(predictions[:, :4])
+
+pred_boxes[:, 0:2] = (predictions[:, 0:2] + grids) * expanded_strides
+pred_boxes[:, 2:4] = np.exp(predictions[:, 2:4]) * expanded_strides
+
 boxes = []
 scores = []
 class_ids = []
 
-for pred in predictions:
-
-    if len(pred) < 5 + NUM_CLASSES:
-        continue
-
-    # Apply sigmoid to objectness
-    obj_conf = sigmoid(pred[4])
-
-    # Apply sigmoid to class scores
-    class_scores = sigmoid(pred[5:])
+for i in range(len(pred_boxes)):
+    obj_conf = predictions[i, 4]
+    class_scores = predictions[i, 5:]
 
     class_id = np.argmax(class_scores)
     class_score = class_scores[class_id]
@@ -29,169 +50,7 @@ for pred in predictions:
     score = obj_conf * class_score
 
     if score > CONF_THRESHOLD:
-        x_center, y_center, w, h = pred[0:4]
-
-        # Convert to corner format
-        x1 = (x_center - w / 2) * orig_w / INPUT_SIZE
-        y1 = (y_center - h / 2) * orig_h / INPUT_SIZE
-        x2 = (x_center + w / 2) * orig_w / INPUT_SIZE
-        y2 = (y_center + h / INPUT_SIZE / 2)
-
-        boxes.append([int(x1), int(y1), int(x2), int(y2)])
-        scores.append(float(score))
-        class_ids.append(class_id)
-
-print("Detections above confidence threshold:", len(boxes))
-
-
-
-import cv2
-import numpy as np
-import tensorflow as tf
-import matplotlib.pyplot as plt
-
-# ==========================
-# CONFIG
-# ==========================
-MODEL_PATH = "yolox.tflite"
-IMAGE_PATH = "test.jpg"
-INPUT_SIZE = 640
-NUM_CLASSES = 2
-CONF_THRESHOLD = 0.3
-NMS_THRESHOLD = 0.45
-
-CLASS_NAMES = ["normal_edit_text", "focused_edit_text"]
-
-# ==========================
-# LOAD MODEL
-# ==========================
-print("\n==============================")
-print("Loading TFLite model...")
-print("==============================")
-
-interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
-interpreter.allocate_tensors()
-
-input_details = interpreter.get_input_details()
-output_details = interpreter.get_output_details()
-
-print("\n=== INPUT DETAILS ===")
-print(input_details)
-
-print("\n=== OUTPUT DETAILS ===")
-print(output_details)
-
-print("\nModel input shape:", input_details[0]['shape'])
-print("Model input dtype:", input_details[0]['dtype'])
-print("Output shape:", output_details[0]['shape'])
-print("Output dtype:", output_details[0]['dtype'])
-print("Output quantization params:", output_details[0]['quantization'])
-
-
-# ==========================
-# LOAD IMAGE
-# ==========================
-print("\n==============================")
-print("Reading image...")
-print("==============================")
-
-original_image = cv2.imread(IMAGE_PATH)
-if original_image is None:
-    raise ValueError("Image not found!")
-
-orig_h, orig_w = original_image.shape[:2]
-print("Original image shape:", original_image.shape)
-
-image = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
-image_resized = cv2.resize(image, (INPUT_SIZE, INPUT_SIZE))
-print("Resized image shape:", image_resized.shape)
-
-
-# ==========================
-# PREPROCESS
-# ==========================
-print("\n==============================")
-print("Preprocessing image...")
-print("==============================")
-
-input_dtype = input_details[0]['dtype']
-
-if input_dtype == np.float32:
-    image_resized = image_resized.astype(np.float32) / 255.0
-    print("Normalized image to [0,1]")
-else:
-    image_resized = image_resized.astype(input_dtype)
-    print("Converted image to dtype:", input_dtype)
-
-# Convert HWC → CHW (VERY IMPORTANT FOR YOLOX)
-image_transposed = np.transpose(image_resized, (2, 0, 1))
-print("After transpose (CHW):", image_transposed.shape)
-
-# Add batch dimension
-input_data = np.expand_dims(image_transposed, axis=0)
-print("Final input tensor shape:", input_data.shape)
-
-# If quantized model → apply scale
-input_scale, input_zero_point = input_details[0]['quantization']
-if input_scale != 0:
-    print("Applying input quantization...")
-    input_data = input_data / input_scale + input_zero_point
-    input_data = input_data.astype(input_dtype)
-
-interpreter.set_tensor(input_details[0]['index'], input_data)
-
-
-# ==========================
-# INFERENCE
-# ==========================
-print("\n==============================")
-print("Running inference...")
-print("==============================")
-
-interpreter.invoke()
-
-output_data = interpreter.get_tensor(output_details[0]['index'])
-print("Raw output shape:", output_data.shape)
-
-# Dequantize if needed
-output_scale, output_zero_point = output_details[0]['quantization']
-if output_scale != 0:
-    print("Dequantizing output...")
-    output_data = (output_data.astype(np.float32) - output_zero_point) * output_scale
-
-predictions = np.squeeze(output_data)
-print("After squeeze shape:", predictions.shape)
-
-print("\nSample raw predictions (first 5 rows):")
-print(predictions[:5])
-
-
-# ==========================
-# POSTPROCESS (YOLOX style)
-# ==========================
-print("\n==============================")
-print("Processing detections...")
-print("==============================")
-
-boxes = []
-scores = []
-class_ids = []
-
-for idx, pred in enumerate(predictions):
-
-    if len(pred) < 5 + NUM_CLASSES:
-        continue  # skip invalid rows
-
-    obj_conf = pred[4]
-    class_scores = pred[5:]
-
-    class_id = np.argmax(class_scores)
-    class_score = class_scores[class_id]
-
-    score = obj_conf * class_score
-
-    if score > CONF_THRESHOLD:
-        x_center, y_center, w, h = pred[0:4]
+        x_center, y_center, w, h = pred_boxes[i]
 
         x1 = (x_center - w / 2) * orig_w / INPUT_SIZE
         y1 = (y_center - h / 2) * orig_h / INPUT_SIZE
@@ -203,56 +62,3 @@ for idx, pred in enumerate(predictions):
         class_ids.append(class_id)
 
 print("Detections above confidence threshold:", len(boxes))
-
-
-# ==========================
-# APPLY NMS
-# ==========================
-if len(boxes) > 0:
-    indices = cv2.dnn.NMSBoxes(
-        boxes,
-        scores,
-        CONF_THRESHOLD,
-        NMS_THRESHOLD
-    )
-else:
-    indices = []
-
-print("Detections after NMS:", len(indices))
-
-
-# ==========================
-# DRAW BOXES
-# ==========================
-for i in indices:
-    i = i[0] if isinstance(i, (list, tuple, np.ndarray)) else i
-
-    x1, y1, x2, y2 = boxes[i]
-    label = CLASS_NAMES[class_ids[i]]
-    score = scores[i]
-
-    cv2.rectangle(original_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
-    cv2.putText(
-        original_image,
-        f"{label}: {score:.2f}",
-        (x1, y1 - 10),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        (0, 255, 0),
-        2
-    )
-
-
-# ==========================
-# DISPLAY RESULT
-# ==========================
-plt.figure(figsize=(10, 10))
-plt.imshow(cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB))
-plt.axis("off")
-plt.title("YOLOX TFLite Detection")
-plt.show()
-
-
-print("\n==============================")
-print("Inference Complete")
-print("==============================")
