@@ -2,78 +2,24 @@ import cv2
 import numpy as np
 import tensorflow as tf
 
-def run_inference(model_path, image_path):
-    interpreter = tf.lite.Interpreter(model_path=model_path)
-    interpreter.allocate_tensors()
-    
-    img = cv2.imread(image_path)
-    # 1. Standardize Preprocessing
-    input_size = (640, 640)
-    resized = cv2.resize(img, input_size)
-    # YOLOX expects CHW format
-    input_data = resized.transpose((2, 0, 1)).astype(np.float32) / 255.0
-    
-    interpreter.set_tensor(interpreter.get_input_details()[0]['index'], [input_data])
-    interpreter.invoke()
-    output = interpreter.get_tensor(interpreter.get_output_details()[0]['index'])[0]
-
-    print(f"Total proposals from model: {len(output)}")
-    
-    # 2. Check Objectness Score (Column 4)
-    # We will look for anything with a high score WITHOUT decoding first
-    # This helps check if the model is already decoded
-    scores = output[:, 4] 
-    best_idx = np.argsort(scores)[-5:] # Get top 5 highest confidence indices
-    
-    print("\nTop 5 Raw Confidence Scores found:")
-    for idx in best_idx:
-        print(f"Index {idx}: Score {scores[idx]:.4f} | Raw Box Values: {output[idx, :4]}")
-
-    # 3. Simple Drawing based on RAW values (Assuming they might be normalized 0-1)
-    h, w, _ = img.shape
-    for idx in best_idx:
-        if scores[idx] > 0.1:
-            box = output[idx, :4]
-            # Try treating them as normalized 0-1 coordinates
-            x1, y1, x2, y2 = int(box[0]*w), int(box[1]*h), int(box[2]*w), int(box[3]*h)
-            cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 0), 2)
-            print(f"Drew debug box at: {x1, y1, x2, y2}")
-
-    cv2.imshow("RAW Output Test", img)
-    cv2.waitKey(0)
-
-if __name__ == "__main__":
-    run_inference("best_ckpt_yolox_200epoch_mllm_all_neg.tflite", "test.jpg")
-
-
-
-
-
-
-
-
-
-
-
-import cv2
-import numpy as np
-import tensorflow as tf
-
 def sigmoid(x):
     return 1 / (1 + np.exp(-np.clip(x, -20, 20)))
 
 def pre_process(image, input_size=(640, 640)):
+    # YOLOX standard: Letterbox resize to 640x640 with 114 padding
     padded_img = np.ones((input_size[0], input_size[1], 3), dtype=np.uint8) * 114
     r = min(input_size[0] / image.shape[0], input_size[1] / image.shape[1])
     resized_img = cv2.resize(image, (int(image.shape[1] * r), int(image.shape[0] * r)))
     padded_img[:int(image.shape[0] * r), :int(image.shape[1] * r)] = resized_img
+    # Convert HWC to CHW and normalize 0-1
     padded_img = padded_img.transpose((2, 0, 1))
     return np.ascontiguousarray(padded_img, dtype=np.float32) / 255.0, r
 
-def decode_outputs(outputs, input_size, p6=False):
+def decode_yolox(output, input_size=(640, 640)):
+    # Standard YOLOX strides for 8400 proposals
+    strides = [8, 16, 32]
     grids = []
     expanded_strides = []
-    strides = [8, 16, 32] if not p6 else [8, 16, 32, 64]
 
     for stride in strides:
         hsize, wsize = input_size[0] // stride, input_size[1] // stride
@@ -85,54 +31,64 @@ def decode_outputs(outputs, input_size, p6=False):
     grids = np.concatenate(grids, axis=0)
     expanded_strides = np.concatenate(expanded_strides, axis=0)
 
-    # Decode box center and size
-    outputs[..., :2] = (outputs[..., :2] + grids) * expanded_strides
-    outputs[..., 2:4] = np.exp(np.clip(outputs[..., 2:4], -10, 10)) * expanded_strides
+    # Decode Box math: (grid + offset) * stride
+    # Note: Your raw values suggest the model might already have some scaling, 
+    # but we follow the standard YOLOX decoding here.
+    output[..., :2] = (output[..., :2] + grids) * expanded_strides
+    output[..., 2:4] = np.exp(np.clip(output[..., 2:4], -10, 10)) * expanded_strides
     
-    # Convert center-xywh to corner-x1y1x2y2
-    outputs[..., 0] = outputs[..., 0] - outputs[..., 2] / 2
-    outputs[..., 1] = outputs[..., 1] - outputs[..., 3] / 2
-    outputs[..., 2] = outputs[..., 0] + outputs[..., 2]
-    outputs[..., 3] = outputs[..., 1] + outputs[..., 3]
-    return outputs
+    # Center to Corner
+    output[..., 0] = output[..., 0] - output[..., 2] / 2
+    output[..., 1] = output[..., 1] - output[..., 3] / 2
+    # Width/Height to Corner 2
+    output[..., 2] = output[..., 0] + output[..., 2]
+    output[..., 3] = output[..., 1] + output[..., 3]
+    return output
 
 def run_inference(model_path, image_path):
     interpreter = tf.lite.Interpreter(model_path=model_path)
     interpreter.allocate_tensors()
-    
+    input_idx = interpreter.get_input_details()[0]['index']
+    output_idx = interpreter.get_output_details()[0]['index']
+
     img = cv2.imread(image_path)
-    h, w, _ = img.shape
+    if img is None: return
+    h_orig, w_orig = img.shape[:2]
     input_data, ratio = pre_process(img)
     
-    interpreter.set_tensor(interpreter.get_input_details()[0]['index'], [input_data])
+    interpreter.set_tensor(input_idx, [input_data])
     interpreter.invoke()
-    output = interpreter.get_tensor(interpreter.get_output_details()[0]['index'])[0]
+    raw_output = interpreter.get_tensor(output_idx)[0]
 
-    # Apply Sigmoid to confidence and class scores
-    output[..., 4:] = sigmoid(output[..., 4:])
-    predictions = decode_outputs(output, (640, 640))
+    # APPLY SIGMOID to Objectness and Class probabilities
+    raw_output[..., 4:] = sigmoid(raw_output[..., 4:])
+    
+    predictions = decode_yolox(raw_output)
 
+    # Score = Obj_conf * Max_Class_conf
     scores = predictions[:, 4] * np.max(predictions[:, 5:], axis=1)
-    mask = scores > 0.45 # Increased threshold to reduce noise
-    
-    # Scale boxes back to original image and CLIP to image boundaries
+    class_ids = np.argmax(predictions[:, 5:], axis=1)
+
+    # Filtering - Start with 0.1 to see what we find
+    mask = scores > 0.1
     boxes = predictions[mask, :4] / ratio
-    boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, w)
-    boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, h)
-    
-    final_scores = scores[mask]
-    final_classes = np.argmax(predictions[mask, 5:], axis=1)
+    confidences = scores[mask]
+    classes = class_ids[mask]
+
+    print(f"Detections found: {len(boxes)}")
+    class_names = ["focused_edittext", "normal_edittext"]
 
     for i in range(len(boxes)):
-        x1, y1, x2, y2 = boxes[i].astype(int)
-        # Filter out "collapsed" boxes (zero width or height)
-        if (x2 - x1) < 5 or (y2 - y1) < 5: continue
-            
-        color = (0, 0, 255) if final_classes[i] == 0 else (0, 255, 0)
+        x1, y1, x2, y2 = np.clip(boxes[i], 0, [w_orig, h_orig, w_orig, h_orig]).astype(int)
+        
+        # Draw
+        label = f"{class_names[classes[i]]} {confidences[i]:.2f}"
+        color = (0, 0, 255) if classes[i] == 0 else (0, 255, 0)
         cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-        print(f"Detected at: [{x1}, {y1}, {x2}, {y2}] with score {final_scores[i]:.2f}")
+        cv2.putText(img, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        print(f"Found: {label} at {x1, y1, x2, y2}")
 
-    cv2.imshow("Corrected Detections", img)
+    cv2.imshow("Final YOLOX Result", img)
     cv2.waitKey(0)
 
 if __name__ == "__main__":
