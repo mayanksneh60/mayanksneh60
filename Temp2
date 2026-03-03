@@ -1,8 +1,64 @@
-# ==========================
-# YOLOX PROPER DECODE
-# ==========================
+import cv2
+import numpy as np
+import tensorflow as tf
 
-print("\nProcessing detections with proper YOLOX decode...")
+# ==========================
+# CONFIG
+# ==========================
+MODEL_PATH = "model.tflite"
+IMAGE_PATH = "input.jpg"
+INPUT_SIZE = 640
+CONF_THRESHOLD = 0.3
+NMS_THRESHOLD = 0.45
+
+# ==========================
+# LOAD MODEL
+# ==========================
+print("Loading TFLite model...")
+interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
+interpreter.allocate_tensors()
+
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+
+print("Model input shape:", input_details[0]['shape'])
+print("Model output shape:", output_details[0]['shape'])
+
+# ==========================
+# LOAD IMAGE
+# ==========================
+original_img = cv2.imread(IMAGE_PATH)
+orig_h, orig_w = original_img.shape[:2]
+print("Original image shape:", original_img.shape)
+
+# Resize
+img = cv2.resize(original_img, (INPUT_SIZE, INPUT_SIZE))
+img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+img = img.astype(np.float32) / 255.0
+
+# Convert to NCHW (since model expects [1,3,640,640])
+img = np.transpose(img, (2, 0, 1))
+img = np.expand_dims(img, axis=0).astype(np.float32)
+
+print("Final input shape:", img.shape)
+
+# ==========================
+# INFERENCE
+# ==========================
+interpreter.set_tensor(input_details[0]['index'], img)
+interpreter.invoke()
+
+output = interpreter.get_tensor(output_details[0]['index'])
+print("Raw output shape:", output.shape)
+
+predictions = np.squeeze(output)
+print("After squeeze:", predictions.shape)
+print("Sample predictions:\n", predictions[:5])
+
+# ==========================
+# YOLOX DECODE
+# ==========================
+print("\nProcessing detections with correct YOLOX decode...")
 
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
@@ -14,10 +70,8 @@ expanded_strides = []
 for stride in strides:
     hsize = INPUT_SIZE // stride
     wsize = INPUT_SIZE // stride
-
     xv, yv = np.meshgrid(np.arange(wsize), np.arange(hsize))
     grid = np.stack((xv, yv), 2).reshape(-1, 2)
-
     grids.append(grid)
     expanded_strides.append(np.full((grid.shape[0], 1), stride))
 
@@ -31,14 +85,19 @@ class_ids = []
 for i in range(len(predictions)):
 
     tx, ty, tw, th = predictions[i, :4]
+    stride = expanded_strides[i][0]
 
-    # decode center
-    x_center = (tx + grids[i][0]) * expanded_strides[i][0]
-    y_center = (ty + grids[i][1]) * expanded_strides[i][0]
+    # Prevent overflow
+    tw = np.clip(tw, -10, 10)
+    th = np.clip(th, -10, 10)
 
-    # IMPORTANT: do NOT use exp
-    w = tw * expanded_strides[i][0]
-    h = th * expanded_strides[i][0]
+    # Decode center
+    x_center = (tx + grids[i][0]) * stride
+    y_center = (ty + grids[i][1]) * stride
+
+    # Decode width/height (IMPORTANT FIX)
+    w = np.exp(tw) * stride
+    h = np.exp(th) * stride
 
     obj_conf = sigmoid(predictions[i, 4])
     class_scores = sigmoid(predictions[i, 5:])
@@ -55,7 +114,7 @@ for i in range(len(predictions)):
         x2 = x_center + w / 2
         y2 = y_center + h / 2
 
-        # scale back to original image
+        # Scale back to original image
         x1 = x1 * orig_w / INPUT_SIZE
         y1 = y1 * orig_h / INPUT_SIZE
         x2 = x2 * orig_w / INPUT_SIZE
@@ -71,3 +130,34 @@ for i in range(len(predictions)):
         class_ids.append(class_id)
 
 print("Detections before NMS:", len(boxes))
+
+# ==========================
+# NMS
+# ==========================
+indices = cv2.dnn.NMSBoxes(
+    boxes,
+    scores,
+    CONF_THRESHOLD,
+    NMS_THRESHOLD
+)
+
+print("Detections after NMS:", len(indices))
+
+# ==========================
+# DRAW RESULTS
+# ==========================
+for i in indices:
+    i = i[0] if isinstance(i, (list, tuple, np.ndarray)) else i
+    x1, y1, x2, y2 = boxes[i]
+
+    cv2.rectangle(original_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+    cv2.putText(original_img,
+                f"{scores[i]:.2f}",
+                (x1, y1 - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 0),
+                2)
+
+cv2.imwrite("result.jpg", original_img)
+print("Inference complete. Saved to result.jpg")
