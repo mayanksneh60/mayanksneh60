@@ -2,31 +2,39 @@ import cv2
 import numpy as np
 import tensorflow as tf
 
+def sigmoid(x):
+    """Applies sigmoid activation to raw logits."""
+    return 1 / (1 + np.exp(-np.clip(x, -20, 20)))
+
 def pre_process(image, input_size=(640, 640)):
-    """Pre-processes image: letterbox resize, CHW swap, and normalization."""
+    """Standard YOLOX Letterbox preprocessing."""
+    # Create a gray padding canvas
     padded_img = np.ones((input_size[0], input_size[1], 3), dtype=np.uint8) * 114
+    
+    # Calculate resize ratio
     r = min(input_size[0] / image.shape[0], input_size[1] / image.shape[1])
     resized_img = cv2.resize(
-        image,
-        (int(image.shape[1] * r), int(image.shape[0] * r)),
-        interpolation=cv2.INTER_LINEAR,
+        image, 
+        (int(image.shape[1] * r), int(image.shape[0] * r)), 
+        interpolation=cv2.INTER_LINEAR
     ).astype(np.uint8)
+    
+    # Paste resized image onto canvas
     padded_img[: int(image.shape[0] * r), : int(image.shape[1] * r)] = resized_img
     
-    padded_img = padded_img.transpose((2, 0, 1)) # HWC to CHW
-    padded_img = np.ascontiguousarray(padded_img, dtype=np.float32)
-    padded_img /= 255.0 
+    # Convert HWC to CHW and normalize to [0, 1]
+    padded_img = padded_img.transpose((2, 0, 1))
+    padded_img = np.ascontiguousarray(padded_img, dtype=np.float32) / 255.0
     return padded_img, r
 
 def decode_yolox(output, input_size=(640, 640)):
-    """Decodes raw YOLOX output from grid-offsets to image coordinates."""
+    """Decodes grid-based offsets into image coordinates."""
     grids = []
     expanded_strides = []
     strides = [8, 16, 32] 
 
     for stride in strides:
-        hsize = input_size[0] // stride
-        wsize = input_size[1] // stride
+        hsize, wsize = input_size[0] // stride, input_size[1] // stride
         grid_y, grid_x = np.meshgrid(np.arange(hsize), np.arange(wsize))
         grid = np.stack((grid_x, grid_y), axis=-1).reshape(-1, 2)
         grids.append(grid)
@@ -35,84 +43,72 @@ def decode_yolox(output, input_size=(640, 640)):
     grids = np.concatenate(grids, axis=0)
     expanded_strides = np.concatenate(expanded_strides, axis=0)
 
-    # Copy output to avoid modifying the original buffer
+    # 1. Apply Sigmoid to Objectness and Class probabilities
+    # Predictions indices: [0-3: boxes, 4: obj_score, 5-6: class_scores]
+    output[..., 4:] = sigmoid(output[..., 4:])
+
+    # 2. Decode Box coordinates: (grid + offset) * stride
     outputs = output.copy()
     outputs[..., :2] = (outputs[..., :2] + grids) * expanded_strides
+    outputs[..., 2:4] = np.exp(np.clip(outputs[..., 2:4], -10, 10)) * expanded_strides
     
-    # SAFETY: Clip log-space values to prevent np.exp() from hitting Infinity
-    outputs[..., 2:4] = np.clip(outputs[..., 2:4], -10, 10) 
-    outputs[..., 2:4] = np.exp(outputs[..., 2:4]) * expanded_strides
+    # Convert center xywh to corner x1y1x2y2
+    outputs[..., 0] = outputs[..., 0] - outputs[..., 2] / 2
+    outputs[..., 1] = outputs[..., 1] - outputs[..., 3] / 2
+    outputs[..., 2] = outputs[..., 0] + outputs[..., 2]
+    outputs[..., 3] = outputs[..., 1] + outputs[..., 3]
     return outputs
 
 def run_inference(model_path, image_path):
-    # 1. Load Model
+    # Initialize TFLite
     interpreter = tf.lite.Interpreter(model_path=model_path)
     interpreter.allocate_tensors()
-    input_details = interpreter.get_input_details()
-    output_details = interpreter.get_output_details()
+    input_idx = interpreter.get_input_details()[0]['index']
+    output_idx = interpreter.get_output_details()[0]['index']
 
-    # 2. Prepare Image
+    # Load and Pre-process
     original_img = cv2.imread(image_path)
     if original_img is None:
-        print("Error: Image not found.")
+        print("Error: Could not load image.")
         return
-        
-    input_size = (640, 640)
-    input_data, ratio = pre_process(original_img, input_size)
-    input_data = np.expand_dims(input_data, axis=0)
-
-    # 3. Inference
-    interpreter.set_tensor(input_details[0]['index'], input_data)
-    interpreter.invoke()
-    output_data = interpreter.get_tensor(output_details[0]['index'])
-
-    # 4. Decode and Filter
-    # output_data shape is (1, 8400, 7)
-    predictions = decode_yolox(output_data[0], input_size)
     
+    input_data, ratio = pre_process(original_img)
+    
+    # Run Model
+    interpreter.set_tensor(input_idx, [input_data])
+    interpreter.invoke()
+    raw_preds = interpreter.get_tensor(output_idx)[0]
+
+    # Decode and Filter
+    predictions = decode_yolox(raw_preds)
+    
+    # Combined Score = Objectness * Max(Class Probabilities)
     scores = predictions[:, 4] * np.max(predictions[:, 5:], axis=1)
     class_ids = np.argmax(predictions[:, 5:], axis=1)
 
-    # Use a low threshold to catch early training results
-    mask = scores > 0.05 
-    filtered_boxes = predictions[mask, :4]
-    filtered_scores = scores[mask]
-    filtered_classes = class_ids[mask]
+    # Filter with a reasonable threshold
+    mask = scores > 0.3
+    boxes = predictions[mask, :4] / ratio
+    confidences = scores[mask]
+    classes = class_ids[mask]
 
-    print(f"Detections found: {len(filtered_boxes)}")
+    print(f"Final detections above threshold: {len(boxes)}")
 
-    # 5. Draw Results
+    # Draw Results
     class_names = ["focused_edittext", "normal_edittext"]
-    for i in range(len(filtered_boxes)):
-        box = filtered_boxes[i]
-        
-        # Calculate coordinates in original image space
-        x1_raw = (box[0] - box[2]/2) / ratio
-        y1_raw = (box[1] - box[3]/2) / ratio
-        x2_raw = (box[0] + box[2]/2) / ratio
-        y2_raw = (box[1] + box[3]/2) / ratio
-        
-        coords = [x1_raw, y1_raw, x2_raw, y2_raw]
-
-        # SAFETY: Check if any value is Inf or NaN before converting to int
-        if not np.all(np.isfinite(coords)):
-            continue
-
-        x1, y1, x2, y2 = map(int, coords)
-        
-        label = f"{class_names[filtered_classes[i]]}: {filtered_scores[i]:.2f}"
-        color = (0, 0, 255) if filtered_classes[i] == 0 else (0, 255, 0) # Red for focused, Green for normal
+    for i in range(len(boxes)):
+        x1, y1, x2, y2 = boxes[i].astype(int)
+        label = f"{class_names[classes[i]]}: {confidences[i]:.2f}"
+        color = (0, 0, 255) if classes[i] == 0 else (0, 255, 0)
         
         cv2.rectangle(original_img, (x1, y1), (x2, y2), color, 2)
         cv2.putText(original_img, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-        print(f"Detected: {label} at [{x1}, {y1}, {x2}, {y2}]")
+        print(f"Detected {label} at [{x1}, {y1}, {x2}, {y2}]")
 
-    cv2.imshow("Inference Result", original_img)
+    cv2.imshow("Result", original_img)
     cv2.waitKey(0)
-    cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    # Update these paths to your actual files
-    MODEL_FILE = "best_ckpt_yolox_200epoch_mllm_all_neg.tflite"
-    TEST_IMAGE = "test.jpg" 
-    run_inference(MODEL_FILE, TEST_IMAGE)
+    MODEL = "best_ckpt_yolox_200epoch_mllm_all_neg.tflite"
+    IMAGE = "test.jpg"
+    run_inference(MODEL, IMAGE)
