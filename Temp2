@@ -2,6 +2,63 @@ import cv2
 import numpy as np
 import tensorflow as tf
 
+def run_inference(model_path, image_path):
+    interpreter = tf.lite.Interpreter(model_path=model_path)
+    interpreter.allocate_tensors()
+    
+    img = cv2.imread(image_path)
+    # 1. Standardize Preprocessing
+    input_size = (640, 640)
+    resized = cv2.resize(img, input_size)
+    # YOLOX expects CHW format
+    input_data = resized.transpose((2, 0, 1)).astype(np.float32) / 255.0
+    
+    interpreter.set_tensor(interpreter.get_input_details()[0]['index'], [input_data])
+    interpreter.invoke()
+    output = interpreter.get_tensor(interpreter.get_output_details()[0]['index'])[0]
+
+    print(f"Total proposals from model: {len(output)}")
+    
+    # 2. Check Objectness Score (Column 4)
+    # We will look for anything with a high score WITHOUT decoding first
+    # This helps check if the model is already decoded
+    scores = output[:, 4] 
+    best_idx = np.argsort(scores)[-5:] # Get top 5 highest confidence indices
+    
+    print("\nTop 5 Raw Confidence Scores found:")
+    for idx in best_idx:
+        print(f"Index {idx}: Score {scores[idx]:.4f} | Raw Box Values: {output[idx, :4]}")
+
+    # 3. Simple Drawing based on RAW values (Assuming they might be normalized 0-1)
+    h, w, _ = img.shape
+    for idx in best_idx:
+        if scores[idx] > 0.1:
+            box = output[idx, :4]
+            # Try treating them as normalized 0-1 coordinates
+            x1, y1, x2, y2 = int(box[0]*w), int(box[1]*h), int(box[2]*w), int(box[3]*h)
+            cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 0), 2)
+            print(f"Drew debug box at: {x1, y1, x2, y2}")
+
+    cv2.imshow("RAW Output Test", img)
+    cv2.waitKey(0)
+
+if __name__ == "__main__":
+    run_inference("best_ckpt_yolox_200epoch_mllm_all_neg.tflite", "test.jpg")
+
+
+
+
+
+
+
+
+
+
+
+import cv2
+import numpy as np
+import tensorflow as tf
+
 def sigmoid(x):
     return 1 / (1 + np.exp(-np.clip(x, -20, 20)))
 
