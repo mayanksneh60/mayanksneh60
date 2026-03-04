@@ -1,2 +1,8 @@
-pip uninstall torch torchvision torchaudio -y
-pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https://download.pytorch.org/whl/cu121
+pip uninstall torch torchvision torchaudio transformers -y
+pip uninstall torch torchvision torchaudio transformers -y
+pip cache purge
+
+
+pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cu121
+pip install transformers==4.38.2
+pip install numpy==1.23.5
