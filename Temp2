@@ -1,47 +1,7 @@
 import json
-import os
-import shutil
 
-def fix_coco_category_ids(input_json_path, output_json_path):
-    with open(input_json_path, 'r') as f:
-        data = json.load(f)
+with open("instances_train2017.json") as f:
+    data = json.load(f)
 
-    # Shift category IDs in categories section
-    for category in data["categories"]:
-        category["id"] += 1
-
-    # Shift category IDs in annotations section
-    for annotation in data["annotations"]:
-        annotation["category_id"] += 1
-
-    # Save new JSON
-    with open(output_json_path, 'w') as f:
-        json.dump(data, f)
-
-    print(f"Modified file saved to: {output_json_path}")
-
-
-def create_modified_dataset(original_dataset_path, new_dataset_path):
-    # Copy entire dataset folder
-    shutil.copytree(original_dataset_path, new_dataset_path)
-
-    annotations_path = os.path.join(new_dataset_path, "annotations")
-
-    # Process both train and val annotation files
-    for file_name in os.listdir(annotations_path):
-        if file_name.endswith(".json"):
-            input_json = os.path.join(annotations_path, file_name)
-            output_json = input_json  # overwrite in copied dataset
-            fix_coco_category_ids(input_json, output_json)
-
-    print("New modified dataset created successfully!")
-
-
-# ==============================
-# 🔧 EDIT THESE PATHS
-# ==============================
-
-original_dataset = "/path/to/your/dataset"
-new_dataset = "/path/to/new_modified_dataset"
-
-create_modified_dataset(original_dataset, new_dataset)
+ids = set([ann["category_id"] for ann in data["annotations"]])
+print("Unique category_ids:", sorted(ids))
