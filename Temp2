@@ -1,7 +1,2 @@
-import json
-
-with open("instances_train2017.json") as f:
-    data = json.load(f)
-
-ids = set([ann["category_id"] for ann in data["annotations"]])
-print("Unique category_ids:", sorted(ids))
+pip uninstall torch torchvision torchaudio -y
+pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https://download.pytorch.org/whl/cu121
