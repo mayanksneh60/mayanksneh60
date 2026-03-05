@@ -1,45 +1,84 @@
-import json
 import os
+import json
 import shutil
+import math
+from PIL import Image
 from tqdm import tqdm
 
-INPUT_ROOT = "dataset"
-OUTPUT_ROOT = "dataset_clean"
+INPUT_DATASET = "dataset"
+OUTPUT_DATASET = "dataset_clean"
 
 TRAIN_JSON = "annotations/instances_train2017.json"
 VAL_JSON = "annotations/instances_val2017.json"
 
 DECIMALS = 4
+MIN_BOX_SIZE = 2
 
 
-def clamp(val, minv, maxv):
-    return max(minv, min(val, maxv))
+def is_number(x):
+    return isinstance(x, (int, float)) and not math.isnan(x) and not math.isinf(x)
 
 
-def clean_bbox(bbox, width, height):
+def detect_normalized_bbox(bbox):
+    return max(bbox) <= 1.5
+
+
+def sanitize_bbox(bbox, img_w, img_h):
+
+    if len(bbox) != 4:
+        return None
+
     x, y, w, h = bbox
 
-    x = clamp(x, 0, width)
-    y = clamp(y, 0, height)
-    w = clamp(w, 0, width - x)
-    h = clamp(h, 0, height - y)
+    if not all(is_number(v) for v in bbox):
+        return None
 
-    if w <= 1 or h <= 1:
+    if detect_normalized_bbox(bbox):
+        x *= img_w
+        y *= img_h
+        w *= img_w
+        h *= img_h
+
+    if w <= 0 or h <= 0:
+        return None
+
+    x1 = max(0, x)
+    y1 = max(0, y)
+
+    x2 = min(img_w, x + w)
+    y2 = min(img_h, y + h)
+
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    w = x2 - x1
+    h = y2 - y1
+
+    if w < MIN_BOX_SIZE or h < MIN_BOX_SIZE:
         return None
 
     return [
-        round(x, DECIMALS),
-        round(y, DECIMALS),
+        round(x1, DECIMALS),
+        round(y1, DECIMALS),
         round(w, DECIMALS),
         round(h, DECIMALS)
     ]
 
 
-def process_split(img_folder, ann_file, out_img_folder, out_ann_file):
+def image_valid(path):
+    try:
+        img = Image.open(path)
+        img.verify()
+        return True
+    except:
+        return False
 
-    os.makedirs(out_img_folder, exist_ok=True)
 
-    with open(ann_file) as f:
+def process_split(img_dir, ann_path, out_img_dir, out_ann):
+
+    os.makedirs(out_img_dir, exist_ok=True)
+
+    with open(ann_path) as f:
         coco = json.load(f)
 
     images = {img["id"]: img for img in coco["images"]}
@@ -49,7 +88,7 @@ def process_split(img_folder, ann_file, out_img_folder, out_ann_file):
 
     ann_id = 1
 
-    print("Checking annotations...")
+    print("Validating annotations...")
 
     for ann in tqdm(coco["annotations"]):
 
@@ -60,7 +99,7 @@ def process_split(img_folder, ann_file, out_img_folder, out_ann_file):
 
         img = images[img_id]
 
-        bbox = clean_bbox(
+        bbox = sanitize_bbox(
             ann["bbox"],
             img["width"],
             img["height"]
@@ -71,13 +110,13 @@ def process_split(img_folder, ann_file, out_img_folder, out_ann_file):
 
         cat = ann["category_id"]
 
-        if cat < 0:
+        if not isinstance(cat, int) or cat < 0:
             continue
 
         new_ann = {
             "id": ann_id,
             "image_id": img_id,
-            "category_id": int(cat),
+            "category_id": cat,
             "bbox": bbox,
             "area": round(bbox[2] * bbox[3], DECIMALS),
             "iscrowd": 0
@@ -88,70 +127,79 @@ def process_split(img_folder, ann_file, out_img_folder, out_ann_file):
 
         ann_id += 1
 
-    print("Copying valid images...")
+    print("Checking images...")
 
     new_images = []
-    new_id_map = {}
-
+    id_map = {}
     new_img_id = 1
 
     for img_id, img in tqdm(valid_images.items()):
 
-        src = os.path.join(img_folder, img["file_name"])
-        dst = os.path.join(out_img_folder, img["file_name"])
+        src = os.path.join(img_dir, img["file_name"])
 
         if not os.path.exists(src):
             continue
 
+        if not image_valid(src):
+            continue
+
+        dst = os.path.join(out_img_dir, img["file_name"])
+
         shutil.copy2(src, dst)
 
         img["id"] = new_img_id
-        new_id_map[img_id] = new_img_id
+        id_map[img_id] = new_img_id
 
         new_images.append(img)
         new_img_id += 1
 
-    print("Remapping annotation image ids...")
+    print("Remapping annotations...")
+
+    cleaned_annotations = []
 
     for ann in valid_annotations:
-        if ann["image_id"] in new_id_map:
-            ann["image_id"] = new_id_map[ann["image_id"]]
 
-    categories = coco["categories"]
+        if ann["image_id"] not in id_map:
+            continue
+
+        ann["image_id"] = id_map[ann["image_id"]]
+        cleaned_annotations.append(ann)
 
     new_coco = {
         "images": new_images,
-        "annotations": valid_annotations,
-        "categories": categories
+        "annotations": cleaned_annotations,
+        "categories": coco["categories"]
     }
 
-    with open(out_ann_file, "w") as f:
+    with open(out_ann, "w") as f:
         json.dump(new_coco, f)
 
-    print("Saved:", out_ann_file)
+    print("Saved:", out_ann)
+    print("Images:", len(new_images))
+    print("Annotations:", len(cleaned_annotations))
 
 
 def main():
 
-    os.makedirs(OUTPUT_ROOT + "/train2017", exist_ok=True)
-    os.makedirs(OUTPUT_ROOT + "/val2017", exist_ok=True)
-    os.makedirs(OUTPUT_ROOT + "/annotations", exist_ok=True)
+    os.makedirs(OUTPUT_DATASET + "/train2017", exist_ok=True)
+    os.makedirs(OUTPUT_DATASET + "/val2017", exist_ok=True)
+    os.makedirs(OUTPUT_DATASET + "/annotations", exist_ok=True)
 
     process_split(
-        os.path.join(INPUT_ROOT, "train2017"),
-        os.path.join(INPUT_ROOT, TRAIN_JSON),
-        os.path.join(OUTPUT_ROOT, "train2017"),
-        os.path.join(OUTPUT_ROOT, "annotations/instances_train2017.json")
+        os.path.join(INPUT_DATASET, "train2017"),
+        os.path.join(INPUT_DATASET, TRAIN_JSON),
+        os.path.join(OUTPUT_DATASET, "train2017"),
+        os.path.join(OUTPUT_DATASET, "annotations/instances_train2017.json")
     )
 
     process_split(
-        os.path.join(INPUT_ROOT, "val2017"),
-        os.path.join(INPUT_ROOT, VAL_JSON),
-        os.path.join(OUTPUT_ROOT, "val2017"),
-        os.path.join(OUTPUT_ROOT, "annotations/instances_val2017.json")
+        os.path.join(INPUT_DATASET, "val2017"),
+        os.path.join(INPUT_DATASET, VAL_JSON),
+        os.path.join(OUTPUT_DATASET, "val2017"),
+        os.path.join(OUTPUT_DATASET, "annotations/instances_val2017.json")
     )
 
-    print("Dataset cleaning complete")
+    print("Dataset cleaning finished")
 
 
 if __name__ == "__main__":
