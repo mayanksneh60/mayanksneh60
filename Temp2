@@ -1,22 +1,17 @@
-torch==2.0.1
-torchvision==0.15.2
-torchaudio==2.0.2
+import json
 
-onnx==1.14.0
-onnxruntime==1.15.1
-onnx-simplifier==0.4.33
+file="annotations/instances_train2017.json"
 
-tensorflow==2.13.1
-onnx-tf==1.10.0
-tensorflow-probability==0.21.0
+with open(file) as f:
+    data=json.load(f)
 
-numpy==1.24.4
-scipy==1.10.1
-PyYAML==6.0
+for ann in data["annotations"]:
+    x,y,w,h=ann["bbox"]
 
-pycocotools==2.0.7
-opencv-python==4.8.0.76
-pillow==10.0.0
-tqdm==4.66.1
+    if w<=0 or h<=0:
+        print("Invalid bbox:",ann)
 
-transformers==4.36.2
+    if ann["category_id"] not in [1,2]:
+        print("Invalid category:",ann["category_id"])
+
+print("done")
