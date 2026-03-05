@@ -1,73 +1,158 @@
-import cv2
-import numpy as np
+import json
 import os
+import shutil
+from tqdm import tqdm
 
-os.makedirs("test_dataset/train2017", exist_ok=True)
-os.makedirs("test_dataset/val2017", exist_ok=True)
+INPUT_ROOT = "dataset"
+OUTPUT_ROOT = "dataset_clean"
 
-def make_img(path):
-    img = np.ones((400,400,3), dtype=np.uint8)*255
-    cv2.rectangle(img,(100,150),(300,200),(0,0,255),2)
-    cv2.imwrite(path,img)
+TRAIN_JSON = "annotations/instances_train2017.json"
+VAL_JSON = "annotations/instances_val2017.json"
 
-make_img("test_dataset/train2017/img1.jpg")
-make_img("test_dataset/train2017/img2.jpg")
-make_img("test_dataset/val2017/img3.jpg")
-
-print("images created")
+DECIMALS = 4
 
 
-
-{
- "images":[
-  {"id":1,"file_name":"img1.jpg","width":400,"height":400},
-  {"id":2,"file_name":"img2.jpg","width":400,"height":400}
- ],
- "annotations":[
-  {
-   "id":1,
-   "image_id":1,
-   "category_id":0,
-   "bbox":[100,150,200,50],
-   "area":10000,
-   "iscrowd":0
-  },
-  {
-   "id":2,
-   "image_id":2,
-   "category_id":1,
-   "bbox":[120,160,180,40],
-   "area":7200,
-   "iscrowd":0
-  }
- ],
- "categories":[
-  {"id":0,"name":"normal_edittext"},
-  {"id":1,"name":"focused_edittext"}
- ]
-}
+def clamp(val, minv, maxv):
+    return max(minv, min(val, maxv))
 
 
+def clean_bbox(bbox, width, height):
+    x, y, w, h = bbox
 
-{
- "images":[
-  {"id":3,"file_name":"img3.jpg","width":400,"height":400}
- ],
- "annotations":[
-  {
-   "id":3,
-   "image_id":3,
-   "category_id":0,
-   "bbox":[110,150,200,50],
-   "area":10000,
-   "iscrowd":0
-  }
- ],
- "categories":[
-  {"id":0,"name":"normal_edittext"},
-  {"id":1,"name":"focused_edittext"}
- ]
-}
+    x = clamp(x, 0, width)
+    y = clamp(y, 0, height)
+    w = clamp(w, 0, width - x)
+    h = clamp(h, 0, height - y)
+
+    if w <= 1 or h <= 1:
+        return None
+
+    return [
+        round(x, DECIMALS),
+        round(y, DECIMALS),
+        round(w, DECIMALS),
+        round(h, DECIMALS)
+    ]
 
 
+def process_split(img_folder, ann_file, out_img_folder, out_ann_file):
 
+    os.makedirs(out_img_folder, exist_ok=True)
+
+    with open(ann_file) as f:
+        coco = json.load(f)
+
+    images = {img["id"]: img for img in coco["images"]}
+
+    valid_images = {}
+    valid_annotations = []
+
+    ann_id = 1
+
+    print("Checking annotations...")
+
+    for ann in tqdm(coco["annotations"]):
+
+        img_id = ann["image_id"]
+
+        if img_id not in images:
+            continue
+
+        img = images[img_id]
+
+        bbox = clean_bbox(
+            ann["bbox"],
+            img["width"],
+            img["height"]
+        )
+
+        if bbox is None:
+            continue
+
+        cat = ann["category_id"]
+
+        if cat < 0:
+            continue
+
+        new_ann = {
+            "id": ann_id,
+            "image_id": img_id,
+            "category_id": int(cat),
+            "bbox": bbox,
+            "area": round(bbox[2] * bbox[3], DECIMALS),
+            "iscrowd": 0
+        }
+
+        valid_annotations.append(new_ann)
+        valid_images[img_id] = img
+
+        ann_id += 1
+
+    print("Copying valid images...")
+
+    new_images = []
+    new_id_map = {}
+
+    new_img_id = 1
+
+    for img_id, img in tqdm(valid_images.items()):
+
+        src = os.path.join(img_folder, img["file_name"])
+        dst = os.path.join(out_img_folder, img["file_name"])
+
+        if not os.path.exists(src):
+            continue
+
+        shutil.copy2(src, dst)
+
+        img["id"] = new_img_id
+        new_id_map[img_id] = new_img_id
+
+        new_images.append(img)
+        new_img_id += 1
+
+    print("Remapping annotation image ids...")
+
+    for ann in valid_annotations:
+        if ann["image_id"] in new_id_map:
+            ann["image_id"] = new_id_map[ann["image_id"]]
+
+    categories = coco["categories"]
+
+    new_coco = {
+        "images": new_images,
+        "annotations": valid_annotations,
+        "categories": categories
+    }
+
+    with open(out_ann_file, "w") as f:
+        json.dump(new_coco, f)
+
+    print("Saved:", out_ann_file)
+
+
+def main():
+
+    os.makedirs(OUTPUT_ROOT + "/train2017", exist_ok=True)
+    os.makedirs(OUTPUT_ROOT + "/val2017", exist_ok=True)
+    os.makedirs(OUTPUT_ROOT + "/annotations", exist_ok=True)
+
+    process_split(
+        os.path.join(INPUT_ROOT, "train2017"),
+        os.path.join(INPUT_ROOT, TRAIN_JSON),
+        os.path.join(OUTPUT_ROOT, "train2017"),
+        os.path.join(OUTPUT_ROOT, "annotations/instances_train2017.json")
+    )
+
+    process_split(
+        os.path.join(INPUT_ROOT, "val2017"),
+        os.path.join(INPUT_ROOT, VAL_JSON),
+        os.path.join(OUTPUT_ROOT, "val2017"),
+        os.path.join(OUTPUT_ROOT, "annotations/instances_val2017.json")
+    )
+
+    print("Dataset cleaning complete")
+
+
+if __name__ == "__main__":
+    main()
