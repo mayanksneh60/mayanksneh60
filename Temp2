@@ -1,8 +1,22 @@
-pip uninstall torch torchvision torchaudio transformers -y
-pip uninstall torch torchvision torchaudio transformers -y
-pip cache purge
+torch==2.0.1
+torchvision==0.15.2
+torchaudio==2.0.2
 
+onnx==1.14.0
+onnxruntime==1.15.1
+onnx-simplifier==0.4.33
 
-pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cu121
-pip install transformers==4.38.2
-pip install numpy==1.23.5
+tensorflow==2.13.1
+onnx-tf==1.10.0
+tensorflow-probability==0.21.0
+
+numpy==1.24.4
+scipy==1.10.1
+PyYAML==6.0
+
+pycocotools==2.0.7
+opencv-python==4.8.0.76
+pillow==10.0.0
+tqdm==4.66.1
+
+transformers==4.36.2
