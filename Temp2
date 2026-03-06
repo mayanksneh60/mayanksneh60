@@ -1,20 +1,47 @@
-import json
+train_dataloader: 
+  dataset: 
+    transforms:
+      ops:
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: RandomZoomOut, fill: 0}
+        - {type: RandomIoUCrop, p: 0.8}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: [640, 640]}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
 
-input_json = "instances_train2017.json"
-output_json = "instances_train2017_fixed.json"
+      policy:
+        name: stop_epoch
+        epoch: 71
+        ops: ['RandomPhotometricDistort', 'RandomZoomOut', 'RandomIoUCrop']
+  
+  collate_fn:
+    type: BatchImageCollateFunction
+    scales: [480,512,544,576,608,640,640,640,672,704,736,768,800]
+    stop_epoch: 71
 
-with open(input_json) as f:
-    data = json.load(f)
+  shuffle: True
+  drop_last: True
+  total_batch_size: 16
 
-# Fix categories
-for i,cat in enumerate(data["categories"]):
-    cat["id"] = i
+  num_workers: 2
+  pin_memory: True
+  persistent_workers: False
+  prefetch_factor: 2
 
-# Fix annotations
-for ann in data["annotations"]:
-    ann["category_id"] -= 1
 
-with open(output_json,"w") as f:
-    json.dump(data,f)
+val_dataloader:
+  dataset: 
+    transforms:
+      ops: 
+        - {type: Resize, size: [640, 640]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
 
-print("Fixed class IDs")
+  shuffle: False
+  total_batch_size: 32
+
+  num_workers: 2
+  pin_memory: True
+  persistent_workers: False
