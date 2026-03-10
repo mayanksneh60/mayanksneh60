@@ -1,18 +1,17 @@
 import os
-import shutil
 import json
+import shutil
+import random
 
-# paths
 input_dataset = "dataset"
 output_dataset = "rf_detr_dataset"
 
-train_images = os.path.join(input_dataset, "train2017")
-val_images = os.path.join(input_dataset, "val2017")
+train_img_dir = os.path.join(input_dataset, "train2017")
+val_img_dir = os.path.join(input_dataset, "val2017")
 
-train_ann = os.path.join(input_dataset, "annotations", "instances_train2017.json")
-val_ann = os.path.join(input_dataset, "annotations", "instances_val2017.json")
+train_ann_path = os.path.join(input_dataset, "annotations", "instances_train2017.json")
+val_ann_path = os.path.join(input_dataset, "annotations", "instances_val2017.json")
 
-# output folders
 train_out = os.path.join(output_dataset, "train")
 valid_out = os.path.join(output_dataset, "valid")
 test_out = os.path.join(output_dataset, "test")
@@ -22,38 +21,73 @@ os.makedirs(valid_out, exist_ok=True)
 os.makedirs(test_out, exist_ok=True)
 
 
-def copy_images(src, dst):
-    for file in os.listdir(src):
-        src_file = os.path.join(src, file)
-        dst_file = os.path.join(dst, file)
-        if os.path.isfile(src_file):
-            shutil.copy(src_file, dst_file)
+def save_coco_json(data, path):
+    with open(path, "w") as f:
+        json.dump(data, f)
 
 
-# copy images
-print("Copying train images...")
-copy_images(train_images, train_out)
+def copy_images(images, src_folder, dst_folder):
+    for img in images:
+        src = os.path.join(src_folder, img["file_name"])
+        dst = os.path.join(dst_folder, img["file_name"])
+        shutil.copy(src, dst)
 
-print("Copying validation images...")
-copy_images(val_images, valid_out)
 
-# copy annotation files
-shutil.copy(train_ann, os.path.join(train_out, "_annotations.coco.json"))
-shutil.copy(val_ann, os.path.join(valid_out, "_annotations.coco.json"))
+# -----------------------
+# TRAIN SPLIT
+# -----------------------
+print("Processing train split")
 
-# create empty test annotation file
-empty_test = {
-    "images": [],
-    "annotations": [],
-    "categories": []
+with open(train_ann_path) as f:
+    train_data = json.load(f)
+
+copy_images(train_data["images"], train_img_dir, train_out)
+
+save_coco_json(train_data, os.path.join(train_out, "_annotations.coco.json"))
+
+
+# -----------------------
+# VALID / TEST SPLIT
+# -----------------------
+print("Processing validation and test split")
+
+with open(val_ann_path) as f:
+    val_data = json.load(f)
+
+images = val_data["images"]
+annotations = val_data["annotations"]
+categories = val_data["categories"]
+
+random.shuffle(images)
+
+split_index = int(len(images) * 0.8)
+
+valid_images = images[:split_index]
+test_images = images[split_index:]
+
+valid_ids = set(img["id"] for img in valid_images)
+test_ids = set(img["id"] for img in test_images)
+
+valid_annotations = [a for a in annotations if a["image_id"] in valid_ids]
+test_annotations = [a for a in annotations if a["image_id"] in test_ids]
+
+
+valid_json = {
+    "images": valid_images,
+    "annotations": valid_annotations,
+    "categories": categories
 }
 
-# copy categories from train json
-with open(train_ann) as f:
-    data = json.load(f)
-    empty_test["categories"] = data["categories"]
+test_json = {
+    "images": test_images,
+    "annotations": test_annotations,
+    "categories": categories
+}
 
-with open(os.path.join(test_out, "_annotations.coco.json"), "w") as f:
-    json.dump(empty_test, f)
+copy_images(valid_images, val_img_dir, valid_out)
+copy_images(test_images, val_img_dir, test_out)
+
+save_coco_json(valid_json, os.path.join(valid_out, "_annotations.coco.json"))
+save_coco_json(test_json, os.path.join(test_out, "_annotations.coco.json"))
 
 print("RF-DETR dataset created successfully!")
