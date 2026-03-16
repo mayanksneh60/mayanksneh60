@@ -1,37 +1,65 @@
+import cv2
+import numpy as np
 import tensorflow as tf
 
-# path to your tflite model
-tflite_model_path = "model.tflite"
+MODEL_PATH = "model.tflite"
+IMAGE_PATH = "test.jpg"
 
-# load interpreter
-interpreter = tf.lite.Interpreter(model_path=tflite_model_path)
+CONF_THRESHOLD = 0.4
+
+# load model
+interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
 interpreter.allocate_tensors()
 
-print("\n===== MODEL INPUT DETAILS =====")
 input_details = interpreter.get_input_details()
-
-for i, inp in enumerate(input_details):
-    print(f"\nInput {i}")
-    print("Name:", inp['name'])
-    print("Shape:", inp['shape'])
-    print("Type:", inp['dtype'])
-    print("Quantization:", inp['quantization'])
-
-print("\n===== MODEL OUTPUT DETAILS =====")
 output_details = interpreter.get_output_details()
 
-for i, out in enumerate(output_details):
-    print(f"\nOutput {i}")
-    print("Name:", out['name'])
-    print("Shape:", out['shape'])
-    print("Type:", out['dtype'])
-    print("Quantization:", out['quantization'])
+input_height = input_details[0]['shape'][1]
+input_width = input_details[0]['shape'][2]
 
-print("\n===== ALL TENSOR DETAILS =====")
-tensor_details = interpreter.get_tensor_details()
+# load image
+image = cv2.imread(IMAGE_PATH)
+orig_h, orig_w = image.shape[:2]
 
-for tensor in tensor_details:
-    print("\nName:", tensor['name'])
-    print("Index:", tensor['index'])
-    print("Shape:", tensor['shape'])
-    print("Type:", tensor['dtype'])
+# preprocess
+img = cv2.resize(image, (input_width, input_height))
+img = img.astype(np.float32) / 255.0
+img = np.expand_dims(img, axis=0)
+
+# inference
+interpreter.set_tensor(input_details[0]['index'], img)
+interpreter.invoke()
+
+classes = interpreter.get_tensor(output_details[0]['index'])[0]
+boxes = interpreter.get_tensor(output_details[1]['index'])[0]
+scores = interpreter.get_tensor(output_details[2]['index'])[0]
+
+# draw detections
+for i in range(len(scores)):
+
+    score = scores[i]
+
+    if score < CONF_THRESHOLD:
+        continue
+
+    box = boxes[i]
+
+    x1 = int(box[0] * orig_w)
+    y1 = int(box[1] * orig_h)
+    x2 = int(box[2] * orig_w)
+    y2 = int(box[3] * orig_h)
+
+    cls = int(classes[i])
+
+    cv2.rectangle(image,(x1,y1),(x2,y2),(0,255,0),2)
+    cv2.putText(image,
+                f"class:{cls} {score:.2f}",
+                (x1,y1-10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0,255,0),
+                2)
+
+cv2.imshow("detections",image)
+cv2.waitKey(0)
+cv2.destroyAllWindows()
