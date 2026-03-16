@@ -1,22 +1,37 @@
-pip uninstall torch torchvision onnx onnxruntime onnxsim onnx2tf -y
+import tensorflow as tf
 
-pip install torch==2.1.2
-pip install torchvision==0.16.2
-pip install onnx==1.14.1
-pip install onnxruntime==1.16.3
-pip install onnxsim==0.4.33
-pip install onnx2tf==1.17.10
-pip install onnx_graphsurgeon==0.3.27
-pip install sng4onnx==1.0.3
-pip install onnxconverter-common==1.13.0
+# path to your tflite model
+tflite_model_path = "model.tflite"
 
+# load interpreter
+interpreter = tf.lite.Interpreter(model_path=tflite_model_path)
+interpreter.allocate_tensors()
 
-python - <<EOF
-import torch
-import torchvision
-import onnx
-import onnxsim
-import onnx2tf
-from torchvision.ops import nms
-print("All packages OK")
-EOF
+print("\n===== MODEL INPUT DETAILS =====")
+input_details = interpreter.get_input_details()
+
+for i, inp in enumerate(input_details):
+    print(f"\nInput {i}")
+    print("Name:", inp['name'])
+    print("Shape:", inp['shape'])
+    print("Type:", inp['dtype'])
+    print("Quantization:", inp['quantization'])
+
+print("\n===== MODEL OUTPUT DETAILS =====")
+output_details = interpreter.get_output_details()
+
+for i, out in enumerate(output_details):
+    print(f"\nOutput {i}")
+    print("Name:", out['name'])
+    print("Shape:", out['shape'])
+    print("Type:", out['dtype'])
+    print("Quantization:", out['quantization'])
+
+print("\n===== ALL TENSOR DETAILS =====")
+tensor_details = interpreter.get_tensor_details()
+
+for tensor in tensor_details:
+    print("\nName:", tensor['name'])
+    print("Index:", tensor['index'])
+    print("Shape:", tensor['shape'])
+    print("Type:", tensor['dtype'])
