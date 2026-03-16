@@ -5,28 +5,28 @@ import tensorflow as tf
 MODEL_PATH = "model.tflite"
 IMAGE_PATH = "test.jpg"
 
-CONF_THRESHOLD = 0.4
+CONF_THRESHOLD = 0.3
 
-# load model
+# Load model
 interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
 interpreter.allocate_tensors()
 
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
-input_height = input_details[0]['shape'][1]
-input_width = input_details[0]['shape'][2]
+input_h = input_details[0]['shape'][1]
+input_w = input_details[0]['shape'][2]
 
-# load image
+# Load image
 image = cv2.imread(IMAGE_PATH)
 orig_h, orig_w = image.shape[:2]
 
-# preprocess
-img = cv2.resize(image, (input_width, input_height))
+# Preprocess
+img = cv2.resize(image, (input_w, input_h))
 img = img.astype(np.float32) / 255.0
 img = np.expand_dims(img, axis=0)
 
-# inference
+# Run inference
 interpreter.set_tensor(input_details[0]['index'], img)
 interpreter.invoke()
 
@@ -34,32 +34,43 @@ classes = interpreter.get_tensor(output_details[0]['index'])[0]
 boxes = interpreter.get_tensor(output_details[1]['index'])[0]
 scores = interpreter.get_tensor(output_details[2]['index'])[0]
 
-# draw detections
+print("Max score:", np.max(scores))
+
+# Draw detections
 for i in range(len(scores)):
 
     score = scores[i]
-
     if score < CONF_THRESHOLD:
         continue
 
-    box = boxes[i]
+    cx, cy, w, h = boxes[i]
 
-    x1 = int(box[0] * orig_w)
-    y1 = int(box[1] * orig_h)
-    x2 = int(box[2] * orig_w)
-    y2 = int(box[3] * orig_h)
+    # convert normalized cxcywh -> xyxy
+    x1 = int((cx - w/2) * orig_w)
+    y1 = int((cy - h/2) * orig_h)
+    x2 = int((cx + w/2) * orig_w)
+    y2 = int((cy + h/2) * orig_h)
+
+    # clip coordinates
+    x1 = max(0, min(orig_w, x1))
+    y1 = max(0, min(orig_h, y1))
+    x2 = max(0, min(orig_w, x2))
+    y2 = max(0, min(orig_h, y2))
 
     cls = int(classes[i])
 
-    cv2.rectangle(image,(x1,y1),(x2,y2),(0,255,0),2)
+    cv2.rectangle(image, (x1, y1), (x2, y2), (0,255,0), 2)
+
+    label = f"class {cls} {score:.2f}"
+
     cv2.putText(image,
-                f"class:{cls} {score:.2f}",
-                (x1,y1-10),
+                label,
+                (x1, y1 - 10),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
+                0.5,
                 (0,255,0),
                 2)
 
-cv2.imshow("detections",image)
-cv2.waitKey(0)
-cv2.destroyAllWindows()
+# Save result
+cv2.imwrite("result.jpg", image)
+print("Saved result → result.jpg")
