@@ -1,76 +1,110 @@
-import cv2
-import numpy as np
-import tensorflow as tf
+import android.content.Context
+import android.graphics.*
+import org.tensorflow.lite.Interpreter
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
-MODEL_PATH = "model.tflite"
-IMAGE_PATH = "test.jpg"
+class TFLiteDetector(context: Context) {
 
-CONF_THRESHOLD = 0.3
+    private val interpreter: Interpreter
+    private val inputWidth = 768
+    private val inputHeight = 768
+    private val confThreshold = 0.4f
 
-# Load model
-interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
-interpreter.allocate_tensors()
+    init {
+        val model = context.assets.open("model.tflite").readBytes()
+        interpreter = Interpreter(model)
+    }
 
-input_details = interpreter.get_input_details()
-output_details = interpreter.get_output_details()
+    fun detect(bitmap: Bitmap): Bitmap {
 
-input_h = input_details[0]['shape'][1]
-input_w = input_details[0]['shape'][2]
+        val origWidth = bitmap.width
+        val origHeight = bitmap.height
 
-# Load image
-image = cv2.imread(IMAGE_PATH)
-orig_h, orig_w = image.shape[:2]
+        val resized = Bitmap.createScaledBitmap(bitmap, inputWidth, inputHeight, true)
 
-# Preprocess
-img = cv2.resize(image, (input_w, input_h))
-img = img.astype(np.float32) / 255.0
-img = np.expand_dims(img, axis=0)
+        val inputBuffer = ByteBuffer.allocateDirect(1 * inputWidth * inputHeight * 3 * 4)
+        inputBuffer.order(ByteOrder.nativeOrder())
 
-# Run inference
-interpreter.set_tensor(input_details[0]['index'], img)
-interpreter.invoke()
+        val pixels = IntArray(inputWidth * inputHeight)
+        resized.getPixels(pixels, 0, inputWidth, 0, 0, inputWidth, inputHeight)
 
-classes = interpreter.get_tensor(output_details[0]['index'])[0]
-boxes = interpreter.get_tensor(output_details[1]['index'])[0]
-scores = interpreter.get_tensor(output_details[2]['index'])[0]
+        var index = 0
+        for (i in 0 until inputHeight) {
+            for (j in 0 until inputWidth) {
 
-print("Max score:", np.max(scores))
+                val pixel = pixels[index++]
 
-# Draw detections
-for i in range(len(scores)):
+                val r = ((pixel shr 16) and 0xFF) / 255.0f
+                val g = ((pixel shr 8) and 0xFF) / 255.0f
+                val b = (pixel and 0xFF) / 255.0f
 
-    score = scores[i]
-    if score < CONF_THRESHOLD:
-        continue
+                inputBuffer.putFloat(r)
+                inputBuffer.putFloat(g)
+                inputBuffer.putFloat(b)
+            }
+        }
 
-    cx, cy, w, h = boxes[i]
+        // Outputs
+        val classes = Array(1) { LongArray(150) }
+        val boxes = Array(1) { Array(150) { FloatArray(4) } }
+        val scores = Array(1) { FloatArray(150) }
 
-    # convert normalized cxcywh -> xyxy
-    x1 = int((cx - w/2) * orig_w)
-    y1 = int((cy - h/2) * orig_h)
-    x2 = int((cx + w/2) * orig_w)
-    y2 = int((cy + h/2) * orig_h)
+        val outputs = HashMap<Int, Any>()
+        outputs[0] = classes
+        outputs[1] = boxes
+        outputs[2] = scores
 
-    # clip coordinates
-    x1 = max(0, min(orig_w, x1))
-    y1 = max(0, min(orig_h, y1))
-    x2 = max(0, min(orig_w, x2))
-    y2 = max(0, min(orig_h, y2))
+        interpreter.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs)
 
-    cls = int(classes[i])
+        val resultBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(resultBitmap)
 
-    cv2.rectangle(image, (x1, y1), (x2, y2), (0,255,0), 2)
+        val paint = Paint()
+        paint.color = Color.GREEN
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 4f
 
-    label = f"class {cls} {score:.2f}"
+        val textPaint = Paint()
+        textPaint.color = Color.GREEN
+        textPaint.textSize = 40f
 
-    cv2.putText(image,
-                label,
-                (x1, y1 - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0,255,0),
-                2)
+        for (i in 0 until 150) {
 
-# Save result
-cv2.imwrite("result.jpg", image)
-print("Saved result → result.jpg")
+            val score = scores[0][i]
+
+            if (score < confThreshold) continue
+
+            val box = boxes[0][i]
+
+            var x1 = (box[0] * origWidth / inputWidth).toInt()
+            var y1 = (box[1] * origHeight / inputHeight).toInt()
+            var x2 = (box[2] * origWidth / inputWidth).toInt()
+            var y2 = (box[3] * origHeight / inputHeight).toInt()
+
+            x1 = x1.coerceIn(0, origWidth)
+            y1 = y1.coerceIn(0, origHeight)
+            x2 = x2.coerceIn(0, origWidth)
+            y2 = y2.coerceIn(0, origHeight)
+
+            val cls = classes[0][i]
+
+            canvas.drawRect(
+                x1.toFloat(),
+                y1.toFloat(),
+                x2.toFloat(),
+                y2.toFloat(),
+                paint
+            )
+
+            canvas.drawText(
+                "class:$cls ${"%.2f".format(score)}",
+                x1.toFloat(),
+                (y1 - 10).toFloat(),
+                textPaint
+            )
+        }
+
+        return resultBitmap
+    }
+}
