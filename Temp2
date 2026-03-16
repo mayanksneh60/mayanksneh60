@@ -1,1 +1,22 @@
-pip install onnx-graphsurgeon --extra-index-url https://pypi.ngc.nvidia.com
+pip uninstall torch torchvision onnx onnxruntime onnxsim onnx2tf -y
+
+pip install torch==2.1.2
+pip install torchvision==0.16.2
+pip install onnx==1.14.1
+pip install onnxruntime==1.16.3
+pip install onnxsim==0.4.33
+pip install onnx2tf==1.17.10
+pip install onnx_graphsurgeon==0.3.27
+pip install sng4onnx==1.0.3
+pip install onnxconverter-common==1.13.0
+
+
+python - <<EOF
+import torch
+import torchvision
+import onnx
+import onnxsim
+import onnx2tf
+from torchvision.ops import nms
+print("All packages OK")
+EOF
