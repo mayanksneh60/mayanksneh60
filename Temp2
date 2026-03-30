@@ -1,92 +1,125 @@
-import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.RectF
-import org.tensorflow.lite.Interpreter
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
+import os
+import json
+import shutil
+import random
+from PIL import Image
 
-class TFLiteDetector(context: Context) {
+ROOT_DIR = "input_data"
+OUTPUT_DIR = "dataset"
 
-    private val interpreter: Interpreter
-    private val inputWidth = 768
-    private val inputHeight = 768
-    private val confThreshold = 0.4f
+TRAIN_DIR = os.path.join(OUTPUT_DIR, "train2017")
+VAL_DIR = os.path.join(OUTPUT_DIR, "val2017")
+ANN_DIR = os.path.join(OUTPUT_DIR, "annotations")
 
-    init {
-        val model = context.assets.open("model.tflite").readBytes()
-        interpreter = Interpreter(model)
+os.makedirs(TRAIN_DIR, exist_ok=True)
+os.makedirs(VAL_DIR, exist_ok=True)
+os.makedirs(ANN_DIR, exist_ok=True)
+
+# Categories
+CATEGORIES = [
+    {"id": 1, "name": "focused_edittext"},
+    {"id": 2, "name": "normal_edittext"},
+    {"id": 3, "name": "textview"},
+]
+
+def get_category_id(view):
+    cls = view.get("class", "")
+    focused = view.get("focused", False)
+
+    if cls == "android.widget.EditText":
+        return 1 if focused else 2
+    elif cls == "android.widget.TextView":
+        return 3
+    return None
+
+
+# Collect all image-json pairs
+pairs = []
+
+for folder in os.listdir(ROOT_DIR):
+    folder_path = os.path.join(ROOT_DIR, folder)
+
+    if not os.path.isdir(folder_path):
+        continue
+
+    for file in os.listdir(folder_path):
+        if file.endswith(".jpg"):
+            img_path = os.path.join(folder_path, file)
+            json_path = img_path.replace(".jpg", ".json")
+
+            if os.path.exists(json_path):
+                pairs.append((img_path, json_path))
+
+# Shuffle and split
+random.shuffle(pairs)
+split_idx = int(0.8 * len(pairs))
+
+train_pairs = pairs[:split_idx]
+val_pairs = pairs[split_idx:]
+
+
+def create_coco(pairs, output_img_dir):
+    images = []
+    annotations = []
+    ann_id = 1
+    img_id = 1
+
+    for img_path, json_path in pairs:
+        img = Image.open(img_path)
+        width, height = img.size
+
+        file_name = f"{img_id}.jpg"
+        shutil.copy(img_path, os.path.join(output_img_dir, file_name))
+
+        images.append({
+            "id": img_id,
+            "file_name": file_name,
+            "width": width,
+            "height": height
+        })
+
+        with open(json_path, "r") as f:
+            data = json.load(f)
+
+        for view in data.get("views", []):
+            category_id = get_category_id(view)
+            if category_id is None:
+                continue
+
+            (x1, y1), (x2, y2) = view["bounds"]
+
+            bbox = [x1, y1, x2 - x1, y2 - y1]
+            area = (x2 - x1) * (y2 - y1)
+
+            annotations.append({
+                "id": ann_id,
+                "image_id": img_id,
+                "category_id": category_id,
+                "bbox": bbox,
+                "area": area,
+                "iscrowd": 0
+            })
+
+            ann_id += 1
+
+        img_id += 1
+
+    return {
+        "images": images,
+        "annotations": annotations,
+        "categories": CATEGORIES
     }
 
-    fun detect(bitmap: Bitmap): List<Detection> {
 
-        val origWidth = bitmap.width
-        val origHeight = bitmap.height
+# Create datasets
+train_coco = create_coco(train_pairs, TRAIN_DIR)
+val_coco = create_coco(val_pairs, VAL_DIR)
 
-        val resized = Bitmap.createScaledBitmap(bitmap, inputWidth, inputHeight, true)
+# Save JSONs
+with open(os.path.join(ANN_DIR, "instances_train2017.json"), "w") as f:
+    json.dump(train_coco, f, indent=2)
 
-        val inputBuffer = ByteBuffer.allocateDirect(1 * inputWidth * inputHeight * 3 * 4)
-        inputBuffer.order(ByteOrder.nativeOrder())
+with open(os.path.join(ANN_DIR, "instances_val2017.json"), "w") as f:
+    json.dump(val_coco, f, indent=2)
 
-        val pixels = IntArray(inputWidth * inputHeight)
-        resized.getPixels(pixels, 0, inputWidth, 0, 0, inputWidth, inputHeight)
-
-        var index = 0
-        for (i in 0 until inputHeight) {
-            for (j in 0 until inputWidth) {
-
-                val pixel = pixels[index++]
-
-                val r = ((pixel shr 16) and 0xFF) / 255.0f
-                val g = ((pixel shr 8) and 0xFF) / 255.0f
-                val b = (pixel and 0xFF) / 255.0f
-
-                inputBuffer.putFloat(r)
-                inputBuffer.putFloat(g)
-                inputBuffer.putFloat(b)
-            }
-        }
-
-        val classes = Array(1) { LongArray(150) }
-        val boxes = Array(1) { Array(150) { FloatArray(4) } }
-        val scores = Array(1) { FloatArray(150) }
-
-        val outputs = HashMap<Int, Any>()
-        outputs[0] = classes
-        outputs[1] = boxes
-        outputs[2] = scores
-
-        interpreter.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs)
-
-        val detections = mutableListOf<Detection>()
-
-        for (i in 0 until 150) {
-
-            val score = scores[0][i]
-            if (score < confThreshold) continue
-
-            val box = boxes[0][i]
-
-            var x1 = box[0] * origWidth / inputWidth
-            var y1 = box[1] * origHeight / inputHeight
-            var x2 = box[2] * origWidth / inputWidth
-            var y2 = box[3] * origHeight / inputHeight
-
-            x1 = x1.coerceIn(0f, origWidth.toFloat())
-            y1 = y1.coerceIn(0f, origHeight.toFloat())
-            x2 = x2.coerceIn(0f, origWidth.toFloat())
-            y2 = y2.coerceIn(0f, origHeight.toFloat())
-
-            val rect = RectF(x1, y1, x2, y2)
-
-            val detection = Detection(
-                classId = classes[0][i].toInt(),
-                score = score,
-                box = rect
-            )
-
-            detections.add(detection)
-        }
-
-        return detections
-    }
-}
+print("✅ COCO dataset created successfully!")
