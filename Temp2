@@ -1,169 +1,175 @@
 import os
 import json
-import random
 import shutil
 from PIL import Image
 from tqdm import tqdm
-from multiprocessing import Pool, cpu_count
 
-ROOT_DIR = "input_data"
-OUTPUT_DIR = "dataset"
+INPUT_ROOT = "dataset_clean"
+OUTPUT_ROOT = "dataset_clean_fixed"
 
-TRAIN_DIR = os.path.join(OUTPUT_DIR, "train2017")
-VAL_DIR = os.path.join(OUTPUT_DIR, "val2017")
-ANN_DIR = os.path.join(OUTPUT_DIR, "annotations")
-
-os.makedirs(TRAIN_DIR, exist_ok=True)
-os.makedirs(VAL_DIR, exist_ok=True)
-os.makedirs(ANN_DIR, exist_ok=True)
-
-# 🔥 Toggle this
-COPY_IMAGES = False   # <<< SET TRUE if you REALLY need copies
-
-# Categories
-CATEGORIES = [
-    {"id": 1, "name": "focused_edittext"},
-    {"id": 2, "name": "normal_edittext"},
-    {"id": 3, "name": "textview"},
-]
-
-def get_category_id(view):
-    cls = view.get("class", "")
-    focused = view.get("focused", False)
-
-    if cls == "android.widget.EditText":
-        return 1 if focused else 2
-    elif cls == "android.widget.TextView":
-        return 3
-    return None
+EXPECTED_CLASSES = 2
+ROUND_DECIMALS = 4
 
 
-# 🔥 Step 1: Collect all pairs
-def collect_pairs():
-    pairs = []
-    for root, _, files in os.walk(ROOT_DIR):
-        for file in files:
-            if file.endswith(".jpg"):
-                img_path = os.path.join(root, file)
-                json_path = img_path.replace(".jpg", ".json")
-                if os.path.exists(json_path):
-                    pairs.append((img_path, json_path))
-    return pairs
+def validate_bbox(bbox, img_w, img_h):
 
+    x, y, w, h = bbox
 
-# 🔥 Step 2: Worker function (parallel)
-def process_single(args):
-    img_path, json_path, img_id = args
-
-    try:
-        # FAST: only read image header
-        with Image.open(img_path) as img:
-            width, height = img.size
-
-        with open(json_path, "r") as f:
-            data = json.load(f)
-
-        image_info = {
-            "id": img_id,
-            "file_name": os.path.basename(img_path),
-            "width": width,
-            "height": height
-        }
-
-        annotations = []
-        ann_local_id = 0
-
-        for view in data.get("views", []):
-            cat_id = get_category_id(view)
-            if cat_id is None:
-                continue
-
-            (x1, y1), (x2, y2) = view["bounds"]
-
-            bbox = [x1, y1, x2 - x1, y2 - y1]
-            area = (x2 - x1) * (y2 - y1)
-
-            annotations.append({
-                "image_id": img_id,
-                "category_id": cat_id,
-                "bbox": bbox,
-                "area": area,
-                "iscrowd": 0
-            })
-
-            ann_local_id += 1
-
-        return image_info, annotations, img_path
-
-    except Exception as e:
+    if w <= 0 or h <= 0:
         return None
 
+    x2 = x + w
+    y2 = y + h
 
-# 🔥 Step 3: Create COCO
-def create_coco(pairs, output_dir, name):
+    if x2 <= x or y2 <= y:
+        return None
 
-    images = []
-    annotations = []
-    ann_id = 1
+    if x < 0 or y < 0:
+        return None
 
-    tasks = [(img, js, i+1) for i, (img, js) in enumerate(pairs)]
+    if x2 > img_w or y2 > img_h:
+        return None
 
-    with Pool(cpu_count()) as pool:
-        results = list(tqdm(pool.imap(process_single, tasks, chunksize=100),
-                            total=len(tasks),
-                            desc=f"Processing {name}"))
+    return [
+        round(x, ROUND_DECIMALS),
+        round(y, ROUND_DECIMALS),
+        round(w, ROUND_DECIMALS),
+        round(h, ROUND_DECIMALS)
+    ]
 
-    for res in tqdm(results, desc=f"Building {name}"):
-        if res is None:
+
+def process_split(split):
+
+    print(f"\nProcessing {split} dataset...")
+
+    image_dir = os.path.join(INPUT_ROOT, split)
+    ann_file = os.path.join(INPUT_ROOT, "annotations", f"instances_{split}.json")
+
+    output_image_dir = os.path.join(OUTPUT_ROOT, split)
+    os.makedirs(output_image_dir, exist_ok=True)
+
+    with open(ann_file) as f:
+        coco = json.load(f)
+
+    images = {img["id"]: img for img in coco["images"]}
+    annotations = coco["annotations"]
+    categories = coco["categories"]
+
+    class_ids = set([c["id"] for c in categories])
+
+    print("Classes:", class_ids)
+    print("Class Names:", [c["name"] for c in categories])
+
+    if len(class_ids) != EXPECTED_CLASSES:
+        raise Exception(f"Expected {EXPECTED_CLASSES} classes but found {len(class_ids)}")
+
+    cleaned_annotations = []
+    used_images = set()
+
+    removed_boxes = 0
+    removed_images = 0
+
+    for ann in tqdm(annotations):
+
+        image_id = ann["image_id"]
+
+        if image_id not in images:
+            removed_boxes += 1
             continue
 
-        image_info, anns, img_path = res
+        img_info = images[image_id]
+        img_path = os.path.join(image_dir, img_info["file_name"])
 
-        # Copy if needed
-        if COPY_IMAGES:
-            dst = os.path.join(output_dir, image_info["file_name"])
-            if not os.path.exists(dst):
-                shutil.copy(img_path, dst)
+        if not os.path.exists(img_path):
+            removed_boxes += 1
+            continue
 
-        images.append(image_info)
+        try:
+            img = Image.open(img_path)
+            img_w, img_h = img.size
+        except:
+            removed_boxes += 1
+            continue
 
-        for ann in anns:
-            ann["id"] = ann_id
-            annotations.append(ann)
-            ann_id += 1
+        bbox = validate_bbox(ann["bbox"], img_w, img_h)
 
-    return {
-        "images": images,
-        "annotations": annotations,
-        "categories": CATEGORIES
+        if bbox is None:
+            removed_boxes += 1
+            continue
+
+        ann["bbox"] = bbox
+        ann["area"] = round(bbox[2] * bbox[3], ROUND_DECIMALS)
+
+        cleaned_annotations.append(ann)
+        used_images.add(image_id)
+
+    cleaned_images = []
+
+    for img_id in tqdm(used_images):
+
+        img = images[img_id]
+        src = os.path.join(image_dir, img["file_name"])
+        dst = os.path.join(output_image_dir, img["file_name"])
+
+        if not os.path.exists(src):
+            removed_images += 1
+            continue
+
+        shutil.copy(src, dst)
+        cleaned_images.append(img)
+
+    cleaned_dataset = {
+        "images": cleaned_images,
+        "annotations": cleaned_annotations,
+        "categories": categories
     }
 
+    os.makedirs(os.path.join(OUTPUT_ROOT, "annotations"), exist_ok=True)
 
-# 🔥 MAIN
+    out_ann = os.path.join(OUTPUT_ROOT, "annotations", f"instances_{split}.json")
+
+    with open(out_ann, "w") as f:
+        json.dump(cleaned_dataset, f)
+
+    print(f"\n{split} summary:")
+    print("Valid Images:", len(cleaned_images))
+    print("Valid Annotations:", len(cleaned_annotations))
+    print("Removed Boxes:", removed_boxes)
+    print("Removed Images:", removed_images)
+
+
+def main():
+
+    process_split("train2017")
+    process_split("val2017")
+
+    print("\nDataset cleaning finished.")
+    print("Clean dataset saved at:", OUTPUT_ROOT)
+
+
 if __name__ == "__main__":
+    main()
 
-    print("🔍 Collecting data...")
-    pairs = collect_pairs()
 
-    print(f"✅ Total images: {len(pairs)}")
 
-    random.shuffle(pairs)
 
-    split = int(0.8 * len(pairs))
-    train_pairs = pairs[:split]
-    val_pairs = pairs[split:]
+import json
 
-    print(f"🚀 Train: {len(train_pairs)} | Val: {len(val_pairs)}")
+input_json = "instances_train2017.json"
+output_json = "instances_train2017_fixed.json"
 
-    train_coco = create_coco(train_pairs, TRAIN_DIR, "train")
-    val_coco = create_coco(val_pairs, VAL_DIR, "val")
+with open(input_json) as f:
+    data = json.load(f)
 
-    print("💾 Saving JSON...")
+# Fix categories
+for i,cat in enumerate(data["categories"]):
+    cat["id"] = i
 
-    with open(os.path.join(ANN_DIR, "instances_train2017.json"), "w") as f:
-        json.dump(train_coco, f)
+# Fix annotations
+for ann in data["annotations"]:
+    ann["category_id"] -= 1
 
-    with open(os.path.join(ANN_DIR, "instances_val2017.json"), "w") as f:
-        json.dump(val_coco, f)
+with open(output_json,"w") as f:
+    json.dump(data,f)
 
-    print("✅ DONE — COCO dataset ready!")
+print("Fixed class IDs")
