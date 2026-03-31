@@ -1,8 +1,10 @@
 import os
 import json
-import shutil
 import random
+import shutil
 from PIL import Image
+from tqdm import tqdm
+from multiprocessing import Pool, cpu_count
 
 ROOT_DIR = "input_data"
 OUTPUT_DIR = "dataset"
@@ -14,6 +16,9 @@ ANN_DIR = os.path.join(OUTPUT_DIR, "annotations")
 os.makedirs(TRAIN_DIR, exist_ok=True)
 os.makedirs(VAL_DIR, exist_ok=True)
 os.makedirs(ANN_DIR, exist_ok=True)
+
+# 🔥 Toggle this
+COPY_IMAGES = False   # <<< SET TRUE if you REALLY need copies
 
 # Categories
 CATEGORIES = [
@@ -33,57 +38,44 @@ def get_category_id(view):
     return None
 
 
-# Collect all image-json pairs
-pairs = []
-
-for folder in os.listdir(ROOT_DIR):
-    folder_path = os.path.join(ROOT_DIR, folder)
-
-    if not os.path.isdir(folder_path):
-        continue
-
-    for file in os.listdir(folder_path):
-        if file.endswith(".jpg"):
-            img_path = os.path.join(folder_path, file)
-            json_path = img_path.replace(".jpg", ".json")
-
-            if os.path.exists(json_path):
-                pairs.append((img_path, json_path))
-
-# Shuffle and split
-random.shuffle(pairs)
-split_idx = int(0.8 * len(pairs))
-
-train_pairs = pairs[:split_idx]
-val_pairs = pairs[split_idx:]
+# 🔥 Step 1: Collect all pairs
+def collect_pairs():
+    pairs = []
+    for root, _, files in os.walk(ROOT_DIR):
+        for file in files:
+            if file.endswith(".jpg"):
+                img_path = os.path.join(root, file)
+                json_path = img_path.replace(".jpg", ".json")
+                if os.path.exists(json_path):
+                    pairs.append((img_path, json_path))
+    return pairs
 
 
-def create_coco(pairs, output_img_dir):
-    images = []
-    annotations = []
-    ann_id = 1
-    img_id = 1
+# 🔥 Step 2: Worker function (parallel)
+def process_single(args):
+    img_path, json_path, img_id = args
 
-    for img_path, json_path in pairs:
-        img = Image.open(img_path)
-        width, height = img.size
-
-        file_name = f"{img_id}.jpg"
-        shutil.copy(img_path, os.path.join(output_img_dir, file_name))
-
-        images.append({
-            "id": img_id,
-            "file_name": file_name,
-            "width": width,
-            "height": height
-        })
+    try:
+        # FAST: only read image header
+        with Image.open(img_path) as img:
+            width, height = img.size
 
         with open(json_path, "r") as f:
             data = json.load(f)
 
+        image_info = {
+            "id": img_id,
+            "file_name": os.path.basename(img_path),
+            "width": width,
+            "height": height
+        }
+
+        annotations = []
+        ann_local_id = 0
+
         for view in data.get("views", []):
-            category_id = get_category_id(view)
-            if category_id is None:
+            cat_id = get_category_id(view)
+            if cat_id is None:
                 continue
 
             (x1, y1), (x2, y2) = view["bounds"]
@@ -92,17 +84,53 @@ def create_coco(pairs, output_img_dir):
             area = (x2 - x1) * (y2 - y1)
 
             annotations.append({
-                "id": ann_id,
                 "image_id": img_id,
-                "category_id": category_id,
+                "category_id": cat_id,
                 "bbox": bbox,
                 "area": area,
                 "iscrowd": 0
             })
 
-            ann_id += 1
+            ann_local_id += 1
 
-        img_id += 1
+        return image_info, annotations, img_path
+
+    except Exception as e:
+        return None
+
+
+# 🔥 Step 3: Create COCO
+def create_coco(pairs, output_dir, name):
+
+    images = []
+    annotations = []
+    ann_id = 1
+
+    tasks = [(img, js, i+1) for i, (img, js) in enumerate(pairs)]
+
+    with Pool(cpu_count()) as pool:
+        results = list(tqdm(pool.imap(process_single, tasks, chunksize=100),
+                            total=len(tasks),
+                            desc=f"Processing {name}"))
+
+    for res in tqdm(results, desc=f"Building {name}"):
+        if res is None:
+            continue
+
+        image_info, anns, img_path = res
+
+        # Copy if needed
+        if COPY_IMAGES:
+            dst = os.path.join(output_dir, image_info["file_name"])
+            if not os.path.exists(dst):
+                shutil.copy(img_path, dst)
+
+        images.append(image_info)
+
+        for ann in anns:
+            ann["id"] = ann_id
+            annotations.append(ann)
+            ann_id += 1
 
     return {
         "images": images,
@@ -111,15 +139,31 @@ def create_coco(pairs, output_img_dir):
     }
 
 
-# Create datasets
-train_coco = create_coco(train_pairs, TRAIN_DIR)
-val_coco = create_coco(val_pairs, VAL_DIR)
+# 🔥 MAIN
+if __name__ == "__main__":
 
-# Save JSONs
-with open(os.path.join(ANN_DIR, "instances_train2017.json"), "w") as f:
-    json.dump(train_coco, f, indent=2)
+    print("🔍 Collecting data...")
+    pairs = collect_pairs()
 
-with open(os.path.join(ANN_DIR, "instances_val2017.json"), "w") as f:
-    json.dump(val_coco, f, indent=2)
+    print(f"✅ Total images: {len(pairs)}")
 
-print("✅ COCO dataset created successfully!")
+    random.shuffle(pairs)
+
+    split = int(0.8 * len(pairs))
+    train_pairs = pairs[:split]
+    val_pairs = pairs[split:]
+
+    print(f"🚀 Train: {len(train_pairs)} | Val: {len(val_pairs)}")
+
+    train_coco = create_coco(train_pairs, TRAIN_DIR, "train")
+    val_coco = create_coco(val_pairs, VAL_DIR, "val")
+
+    print("💾 Saving JSON...")
+
+    with open(os.path.join(ANN_DIR, "instances_train2017.json"), "w") as f:
+        json.dump(train_coco, f)
+
+    with open(os.path.join(ANN_DIR, "instances_val2017.json"), "w") as f:
+        json.dump(val_coco, f)
+
+    print("✅ DONE — COCO dataset ready!")
