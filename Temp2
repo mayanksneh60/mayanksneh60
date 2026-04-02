@@ -1,14 +1,40 @@
-Dear [Manager’s Name],
+import json
+import os
 
-I hope you are doing well.
+ANN_DIR = "dataset/annotations"
 
-I would like to formally request an internal transfer to other Samsung R&D branches, such as SRIN or SRID, due to certain personal reasons. This decision has been made after careful consideration, and I believe this change will help me better manage my personal commitments while continuing to contribute effectively to the organization.
+train_json = os.path.join(ANN_DIR, "instances_train2017.json")
+val_json = os.path.join(ANN_DIR, "instances_val2017.json")
 
-I want to emphasize that I remain fully committed to my responsibilities and will ensure a smooth transition of my current work. I am also open to discussing any requirements or processes needed to facilitate this transfer.
 
-I would appreciate your understanding and support regarding this request. Please let me know if we can discuss this further.
+def analyze_coco(json_path, name):
+    print(f"\n📊 Analyzing {name}...")
 
-Thank you for your time and consideration.
+    with open(json_path, "r") as f:
+        data = json.load(f)
 
-Best regards,
-[Your Name]
+    num_images = len(data.get("images", []))
+    num_annotations = len(data.get("annotations", []))
+    num_categories = len(data.get("categories", []))
+
+    print(f"Images        : {num_images}")
+    print(f"Annotations   : {num_annotations}")
+    print(f"Categories    : {num_categories}")
+
+    # Count annotations per category
+    cat_count = {}
+    for ann in data.get("annotations", []):
+        cid = ann["category_id"]
+        cat_count[cid] = cat_count.get(cid, 0) + 1
+
+    print("\nAnnotations per category:")
+    for cat in data.get("categories", []):
+        cid = cat["id"]
+        name = cat["name"]
+        count = cat_count.get(cid, 0)
+        print(f"  {name} ({cid}) : {count}")
+
+
+# Run
+analyze_coco(train_json, "Train")
+analyze_coco(val_json, "Validation")
