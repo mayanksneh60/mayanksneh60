@@ -1,201 +1,68 @@
 import os
 import json
+import cv2
 import random
-import shutil
-from PIL import Image
-from tqdm import tqdm
-from multiprocessing import Pool, cpu_count
 
-# ================= CONFIG =================
-ROOT_DIR = "input_data"
-OUTPUT_DIR = "dataset"
+IMG_DIR = "dataset/train2017"
+ANN_PATH = "dataset/annotations/instances_train2017.json"
 
-TRAIN_DIR = os.path.join(OUTPUT_DIR, "train2017")
-VAL_DIR = os.path.join(OUTPUT_DIR, "val2017")
-ANN_DIR = os.path.join(OUTPUT_DIR, "annotations")
+NUM_SAMPLES = 50   # change as needed
 
-COPY_IMAGES = False   # ⚡ Keep False for speed
+COLORS = {
+    1: (0, 0, 255),
+    2: (0, 255, 0),
+    3: (255, 0, 0),
+}
 
-# ==========================================
+CLASS_NAMES = {
+    1: "focused",
+    2: "normal",
+    3: "textview"
+}
 
-os.makedirs(TRAIN_DIR, exist_ok=True)
-os.makedirs(VAL_DIR, exist_ok=True)
-os.makedirs(ANN_DIR, exist_ok=True)
+print("Loading annotations...")
+with open(ANN_PATH, "r") as f:
+    data = json.load(f)
 
-# ✅ Class IDs from 0
-CATEGORIES = [
-    {"id": 0, "name": "focused_edittext"},
-    {"id": 1, "name": "normal_edittext"},
-    {"id": 2, "name": "textview"},
-]
+# 🔥 Pick random images FIRST (key optimization)
+images = random.sample(data["images"], NUM_SAMPLES)
 
-def get_category_id(view):
-    cls = view.get("class", "")
-    focused = view.get("focused", False)
+# Build only required annotation map
+ann_map = {}
+for ann in data["annotations"]:
+    if ann["image_id"] not in ann_map:
+        ann_map[ann["image_id"]] = []
+    ann_map[ann["image_id"]].append(ann)
 
-    if cls == "android.widget.EditText":
-        return 0 if focused else 1
-    elif cls == "android.widget.TextView":
-        return 2
-    return None
+print("Showing samples...")
 
+for img_info in images:
+    img_id = img_info["id"]
+    file_name = img_info["file_name"]
 
-def validate_and_clip_bbox(bounds, img_w, img_h):
-    try:
-        (x1, y1), (x2, y2) = bounds
-    except:
-        return None
+    img_path = os.path.join(IMG_DIR, file_name)
+    img = cv2.imread(img_path)
 
-    # Clip to image
-    x1 = max(0, min(x1, img_w))
-    y1 = max(0, min(y1, img_h))
-    x2 = max(0, min(x2, img_w))
-    y2 = max(0, min(y2, img_h))
+    if img is None:
+        continue
 
-    w = x2 - x1
-    h = y2 - y1
+    # Draw only relevant annotations
+    for ann in ann_map.get(img_id, []):
+        x, y, w, h = ann["bbox"]
+        cid = ann["category_id"]
 
-    if w <= 1 or h <= 1:
-        return None
+        x1, y1 = int(x), int(y)
+        x2, y2 = int(x + w), int(y + h)
 
-    return [round(x1, 2), round(y1, 2), round(w, 2), round(h, 2)]
+        color = COLORS.get(cid, (255, 255, 255))
 
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(img, CLASS_NAMES[cid], (x1, y1-5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
-# ================= COLLECT =================
-def collect_pairs():
-    pairs = []
-    for root, _, files in os.walk(ROOT_DIR):
-        for file in files:
-            if file.endswith(".jpg"):
-                img_path = os.path.join(root, file)
-                json_path = img_path.replace(".jpg", ".json")
-                if os.path.exists(json_path):
-                    pairs.append((img_path, json_path))
+    cv2.imshow("Preview", img)
 
-    print(f"✅ Collected {len(pairs)} image-json pairs")
-    return pairs
+    if cv2.waitKey(300) & 0xFF == 27:  # auto next every 300ms
+        break
 
-
-# ================= WORKER =================
-def process_single(args):
-    img_path, json_path, img_id = args
-
-    try:
-        with Image.open(img_path) as img:
-            width, height = img.size
-
-        with open(json_path) as f:
-            data = json.load(f)
-
-        image_info = {
-            "id": img_id,
-            "file_name": os.path.basename(img_path),
-            "width": width,
-            "height": height
-        }
-
-        annotations = []
-
-        for view in data.get("views", []):
-            cat_id = get_category_id(view)
-            if cat_id is None:
-                continue
-
-            bbox = validate_and_clip_bbox(view.get("bounds"), width, height)
-            if bbox is None:
-                continue
-
-            annotations.append({
-                "image_id": img_id,
-                "category_id": cat_id,
-                "bbox": bbox,
-                "area": round(bbox[2] * bbox[3], 2),
-                "iscrowd": 0
-            })
-
-        # ❌ Skip images without valid boxes
-        if len(annotations) == 0:
-            return None
-
-        return image_info, annotations, img_path
-
-    except Exception:
-        return None
-
-
-# ================= COCO BUILDER =================
-def create_coco(pairs, output_dir, start_img_id):
-
-    images = []
-    annotations = []
-    ann_id = 1
-
-    tasks = [(img, js, start_img_id + i) for i, (img, js) in enumerate(pairs)]
-
-    print(f"\n🚀 Processing {len(tasks)} samples...")
-
-    results = []
-    with Pool(min(8, cpu_count())) as pool:
-        for res in tqdm(pool.imap_unordered(process_single, tasks, chunksize=200),
-                        total=len(tasks),
-                        desc="Processing"):
-            results.append(res)
-
-    print("\n🔧 Building COCO format...")
-
-    for res in tqdm(results, desc="Building"):
-        if res is None:
-            continue
-
-        image_info, anns, img_path = res
-
-        if COPY_IMAGES:
-            dst = os.path.join(output_dir, image_info["file_name"])
-            if not os.path.exists(dst):
-                shutil.copy(img_path, dst)
-
-        images.append(image_info)
-
-        for ann in anns:
-            ann["id"] = ann_id
-            annotations.append(ann)
-            ann_id += 1
-
-    print(f"✅ Final: {len(images)} images | {len(annotations)} annotations")
-
-    return {
-        "images": images,
-        "annotations": annotations,
-        "categories": CATEGORIES
-    }, start_img_id + len(pairs)
-
-
-# ================= MAIN =================
-if __name__ == "__main__":
-
-    print("🔍 Collecting dataset...")
-    pairs = collect_pairs()
-
-    random.shuffle(pairs)
-
-    split = int(0.8 * len(pairs))
-    train_pairs = pairs[:split]
-    val_pairs = pairs[split:]
-
-    print(f"\n📊 Train: {len(train_pairs)} | Val: {len(val_pairs)}")
-
-    print("\n================ TRAIN =================")
-    train_coco, next_id = create_coco(train_pairs, TRAIN_DIR, 1)
-
-    print("\n================ VAL =================")
-    val_coco, _ = create_coco(val_pairs, VAL_DIR, next_id)
-
-    print("\n💾 Saving JSON files...")
-
-    with open(os.path.join(ANN_DIR, "instances_train2017.json"), "w") as f:
-        json.dump(train_coco, f)
-
-    with open(os.path.join(ANN_DIR, "instances_val2017.json"), "w") as f:
-        json.dump(val_coco, f)
-
-    print("\n✅ DONE — Dataset ready!")
+cv2.destroyAllWindows()
