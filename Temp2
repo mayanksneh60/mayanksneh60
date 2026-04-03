@@ -1,76 +1,68 @@
 import os
 import json
 import cv2
+import random
 
-# Paths
 IMG_DIR = "dataset/train2017"
 ANN_PATH = "dataset/annotations/instances_train2017.json"
 
-# Colors (BGR for OpenCV)
+NUM_SAMPLES = 50   # change as needed
+
 COLORS = {
-    1: (0, 0, 255),    # Red - focused_edittext
-    2: (0, 255, 0),    # Green - normal_edittext
-    3: (255, 0, 0),    # Blue - textview
+    1: (0, 0, 255),
+    2: (0, 255, 0),
+    3: (255, 0, 0),
 }
 
 CLASS_NAMES = {
-    1: "focused_edittext",
-    2: "normal_edittext",
+    1: "focused",
+    2: "normal",
     3: "textview"
 }
 
-# Load COCO JSON
+print("Loading annotations...")
 with open(ANN_PATH, "r") as f:
     data = json.load(f)
 
-# Build image_id -> annotations map
+# 🔥 Pick random images FIRST (key optimization)
+images = random.sample(data["images"], NUM_SAMPLES)
+
+# Build only required annotation map
 ann_map = {}
 for ann in data["annotations"]:
-    img_id = ann["image_id"]
-    ann_map.setdefault(img_id, []).append(ann)
+    if ann["image_id"] not in ann_map:
+        ann_map[ann["image_id"]] = []
+    ann_map[ann["image_id"]].append(ann)
 
-# Loop over images
-for img_info in data["images"]:
+print("Showing samples...")
+
+for img_info in images:
     img_id = img_info["id"]
     file_name = img_info["file_name"]
+
     img_path = os.path.join(IMG_DIR, file_name)
-
-    if not os.path.exists(img_path):
-        continue
-
     img = cv2.imread(img_path)
 
-    # Draw boxes
+    if img is None:
+        continue
+
+    # Draw only relevant annotations
     for ann in ann_map.get(img_id, []):
         x, y, w, h = ann["bbox"]
-        category_id = ann["category_id"]
-
-        color = COLORS.get(category_id, (255, 255, 255))
-        label = CLASS_NAMES.get(category_id, "unknown")
+        cid = ann["category_id"]
 
         x1, y1 = int(x), int(y)
         x2, y2 = int(x + w), int(y + h)
 
-        # Draw rectangle
+        color = COLORS.get(cid, (255, 255, 255))
+
         cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(img, CLASS_NAMES[cid], (x1, y1-5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
-        # Put label
-        cv2.putText(
-            img,
-            label,
-            (x1, y1 - 5),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            color,
-            1,
-            cv2.LINE_AA
-        )
+    cv2.imshow("Preview", img)
 
-    # Show image
-    cv2.imshow("Annotations", img)
-
-    key = cv2.waitKey(0)
-    if key == 27:  # ESC to exit
+    if cv2.waitKey(300) & 0xFF == 27:  # auto next every 300ms
         break
 
 cv2.destroyAllWindows()
