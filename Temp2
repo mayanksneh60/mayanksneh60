@@ -1,5 +1,197 @@
 import os
 import json
+import random
+import shutil
+from PIL import Image
+from tqdm import tqdm
+from multiprocessing import Pool, cpu_count
+
+ROOT_DIR = "input_data"
+OUTPUT_DIR = "dataset"
+
+TRAIN_DIR = os.path.join(OUTPUT_DIR, "train2017")
+VAL_DIR = os.path.join(OUTPUT_DIR, "val2017")
+ANN_DIR = os.path.join(OUTPUT_DIR, "annotations")
+
+os.makedirs(TRAIN_DIR, exist_ok=True)
+os.makedirs(VAL_DIR, exist_ok=True)
+os.makedirs(ANN_DIR, exist_ok=True)
+
+COPY_IMAGES = False
+
+# ✅ CLASS IDS START FROM 0
+CATEGORIES = [
+    {"id": 0, "name": "focused_edittext"},
+    {"id": 1, "name": "normal_edittext"},
+    {"id": 2, "name": "textview"},
+]
+
+def get_category_id(view):
+    cls = view.get("class", "")
+    focused = view.get("focused", False)
+
+    if cls == "android.widget.EditText":
+        return 0 if focused else 1
+    elif cls == "android.widget.TextView":
+        return 2
+    return None
+
+
+def validate_and_clip_bbox(bounds, img_w, img_h):
+    try:
+        (x1, y1), (x2, y2) = bounds
+    except:
+        return None
+
+    # clip
+    x1 = max(0, min(x1, img_w))
+    y1 = max(0, min(y1, img_h))
+    x2 = max(0, min(x2, img_w))
+    y2 = max(0, min(y2, img_h))
+
+    w = x2 - x1
+    h = y2 - y1
+
+    if w <= 1 or h <= 1:
+        return None
+
+    return [x1, y1, w, h]
+
+
+def collect_pairs():
+    pairs = []
+    for root, _, files in os.walk(ROOT_DIR):
+        for file in files:
+            if file.endswith(".jpg"):
+                img_path = os.path.join(root, file)
+                json_path = img_path.replace(".jpg", ".json")
+                if os.path.exists(json_path):
+                    pairs.append((img_path, json_path))
+    return pairs
+
+
+def process_single(args):
+    img_path, json_path, img_id = args
+
+    try:
+        with Image.open(img_path) as img:
+            width, height = img.size
+
+        with open(json_path) as f:
+            data = json.load(f)
+
+        image_info = {
+            "id": img_id,
+            "file_name": os.path.basename(img_path),
+            "width": width,
+            "height": height
+        }
+
+        annotations = []
+
+        for view in data.get("views", []):
+            cat_id = get_category_id(view)
+            if cat_id is None:
+                continue
+
+            bbox = validate_and_clip_bbox(view.get("bounds"), width, height)
+            if bbox is None:
+                continue
+
+            area = bbox[2] * bbox[3]
+
+            annotations.append({
+                "image_id": img_id,
+                "category_id": cat_id,
+                "bbox": bbox,
+                "area": area,
+                "iscrowd": 0
+            })
+
+        # ❌ skip images without annotations
+        if len(annotations) == 0:
+            return None
+
+        return image_info, annotations, img_path
+
+    except:
+        return None
+
+
+def create_coco(pairs, output_dir, start_img_id):
+
+    images = []
+    annotations = []
+    ann_id = 1
+    img_id = start_img_id
+
+    tasks = [(img, js, img_id + i) for i, (img, js) in enumerate(pairs)]
+
+    with Pool(cpu_count()) as pool:
+        results = list(tqdm(pool.imap(process_single, tasks, chunksize=200),
+                            total=len(tasks)))
+
+    for res in tqdm(results):
+        if res is None:
+            continue
+
+        image_info, anns, img_path = res
+
+        if COPY_IMAGES:
+            dst = os.path.join(output_dir, image_info["file_name"])
+            if not os.path.exists(dst):
+                shutil.copy(img_path, dst)
+
+        images.append(image_info)
+
+        for ann in anns:
+            ann["id"] = ann_id
+            annotations.append(ann)
+            ann_id += 1
+
+    return {
+        "images": images,
+        "annotations": annotations,
+        "categories": CATEGORIES
+    }, img_id + len(pairs)
+
+
+if __name__ == "__main__":
+
+    print("Collecting data...")
+    pairs = collect_pairs()
+
+    print("Total:", len(pairs))
+
+    random.shuffle(pairs)
+
+    split = int(0.8 * len(pairs))
+    train_pairs = pairs[:split]
+    val_pairs = pairs[split:]
+
+    print("Train:", len(train_pairs), "Val:", len(val_pairs))
+
+    train_coco, next_id = create_coco(train_pairs, TRAIN_DIR, 1)
+    val_coco, _ = create_coco(val_pairs, VAL_DIR, next_id)
+
+    with open(os.path.join(ANN_DIR, "instances_train2017.json"), "w") as f:
+        json.dump(train_coco, f)
+
+    with open(os.path.join(ANN_DIR, "instances_val2017.json"), "w") as f:
+        json.dump(val_coco, f)
+
+    print("DONE")
+
+
+
+
+
+
+
+
+
+import os
+import json
 import cv2
 import random
 
