@@ -1,3 +1,80 @@
-cd /source/folder
+import os
+import json
+import cv2
 
-find . -type f -iname "*.jpg" -print0 | rsync -avz --from0 --no-relative --files-from=- ./ /destination/folder/
+IMG_DIR = "dataset/train2017"
+ANN_PATH = "dataset/annotations/instances_train2017.json"
+
+OUTPUT_DIR = "vis_output"
+NUM_SAMPLES = 200
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+print("Loading annotations...")
+with open(ANN_PATH, "r") as f:
+    data = json.load(f)
+
+# ✅ Dynamic class mapping (fixes your earlier issue)
+CLASS_NAMES = {c["id"]: c["name"] for c in data["categories"]}
+
+# Simple color map (supports any number of classes)
+BASE_COLORS = [
+    (0, 0, 255),
+    (0, 255, 0),
+    (255, 0, 0),
+    (0, 255, 255),
+    (255, 255, 0),
+]
+COLORS = {cid: BASE_COLORS[i % len(BASE_COLORS)] for i, cid in enumerate(CLASS_NAMES)}
+
+# Build annotation map
+ann_map = {}
+for ann in data["annotations"]:
+    ann_map.setdefault(ann["image_id"], []).append(ann)
+
+print("Saving annotated samples...")
+
+count = 0
+
+for img_info in data["images"]:
+    if count >= NUM_SAMPLES:
+        break
+
+    img_id = img_info["id"]
+    file_name = img_info["file_name"]
+
+    img_path = os.path.join(IMG_DIR, file_name)
+    img = cv2.imread(img_path)
+
+    if img is None:
+        continue
+
+    # Draw annotations
+    for ann in ann_map.get(img_id, []):
+        x, y, w, h = ann["bbox"]
+        cid = ann["category_id"]
+
+        x1, y1 = int(x), int(y)
+        x2, y2 = int(x + w), int(y + h)
+
+        color = COLORS.get(cid, (255, 255, 255))
+        label = CLASS_NAMES.get(cid, f"class_{cid}")
+
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(
+            img,
+            label,
+            (x1, y1 - 5),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            color,
+            1
+        )
+
+    # Save image
+    out_path = os.path.join(OUTPUT_DIR, file_name)
+    cv2.imwrite(out_path, img)
+
+    count += 1
+
+print(f"✅ Saved {count} images to {OUTPUT_DIR}")
