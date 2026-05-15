@@ -1,110 +1,15 @@
-import os
-import json
-import cv2
-from tqdm import tqdm
-from paddleocr import TextDetection
-
-DATASET_DIR = "dataset"
-OUTPUT_JSON = "text_coco.json"
-
-# Initialize detection model
-det_model = TextDetection()
-
-coco = {
-    "images": [],
-    "annotations": [],
-    "categories": [
-        {"id": 1, "name": "text"}
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "(gdb) Launch",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${fileDirname}\\${fileBasenameNoExtension}.exe",
+            "cwd": "${fileDirname}",
+            "externalConsole": true,
+            "MIMode": "gdb",
+            "miDebuggerPath": "gdb.exe"
+        }
     ]
 }
-
-image_id = 0
-annotation_id = 0
-
-
-def process_image(img_path):
-    results = det_model.predict(img_path)
-
-    boxes = []
-
-    for item in results:
-        # Handle multiple output formats (dict / list)
-        if isinstance(item, dict):
-            box = item.get("points", None)
-        else:
-            box = item
-
-        if box is None:
-            continue
-
-        # box = [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-        x_coords = [p[0] for p in box]
-        y_coords = [p[1] for p in box]
-
-        x_min = int(min(x_coords))
-        y_min = int(min(y_coords))
-        x_max = int(max(x_coords))
-        y_max = int(max(y_coords))
-
-        w = x_max - x_min
-        h = y_max - y_min
-
-        # filter noise
-        if w < 10 or h < 10:
-            continue
-
-        boxes.append([x_min, y_min, w, h])
-
-    return boxes
-
-
-for root, _, files in os.walk(DATASET_DIR):
-    for fname in tqdm(files):
-        if not fname.lower().endswith(".jpg"):
-            continue
-
-        img_path = os.path.join(root, fname)
-
-        try:
-            img = cv2.imread(img_path)
-            if img is None:
-                continue
-
-            h_img, w_img = img.shape[:2]
-
-            boxes = process_image(img_path)
-
-            # Add image entry
-            coco["images"].append({
-                "id": image_id,
-                "file_name": os.path.relpath(img_path, DATASET_DIR),
-                "width": w_img,
-                "height": h_img
-            })
-
-            # Add annotations
-            for bbox in boxes:
-                x, y, w, h = bbox
-
-                coco["annotations"].append({
-                    "id": annotation_id,
-                    "image_id": image_id,
-                    "category_id": 1,
-                    "bbox": [x, y, w, h],
-                    "area": w * h,
-                    "iscrowd": 0
-                })
-
-                annotation_id += 1
-
-            image_id += 1
-
-        except Exception as e:
-            print(f"Error processing {img_path}: {e}")
-
-
-# Save JSON
-with open(OUTPUT_JSON, "w") as f:
-    json.dump(coco, f, indent=4)
-
-print(f"COCO annotations saved to {OUTPUT_JSON}")
